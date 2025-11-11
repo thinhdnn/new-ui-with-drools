@@ -1,0 +1,1426 @@
+package rule.engine.org.app.api.controller;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import rule.engine.org.app.api.request.RuleOutputRequest;
+import rule.engine.org.app.api.request.CreateRuleRequest;
+import rule.engine.org.app.api.request.UpdateRuleRequest;
+import rule.engine.org.app.api.request.RestoreVersionRequest;
+import rule.engine.org.app.api.response.ConditionResponse;
+import rule.engine.org.app.api.response.RuleExecutionResponse;
+import rule.engine.org.app.api.response.RuleExecuteResponse;
+import rule.engine.org.app.api.response.ErrorResponse;
+import rule.engine.org.app.api.response.RuleResponse;
+import rule.engine.org.app.api.response.DeployResponse;
+import rule.engine.org.app.api.response.PackageInfoResponse;
+import rule.engine.org.app.api.response.ContainerStatusResponse;
+import rule.engine.org.app.api.response.RuleFieldMetadata;
+import rule.engine.org.app.api.response.RuleFieldMetadata.FieldDefinition;
+import rule.engine.org.app.domain.entity.ui.DecisionRule;
+import rule.engine.org.app.domain.entity.ui.FactType;
+import rule.engine.org.app.domain.entity.ui.RuleExecutionResult;
+import rule.engine.org.app.domain.entity.ui.RuleConditionGroup;
+import rule.engine.org.app.domain.entity.ui.RuleCondition;
+import rule.engine.org.app.domain.entity.ui.RuleOutput;
+import rule.engine.org.app.domain.entity.ui.RuleOutputGroup;
+import rule.engine.org.app.domain.entity.ui.RuleGroupType;
+import rule.engine.org.app.domain.entity.ui.RuleOperatorType;
+import rule.engine.org.app.domain.entity.ui.RuleValueType;
+import rule.engine.org.app.domain.repository.DecisionRuleRepository;
+import rule.engine.org.app.domain.repository.RuleExecutionResultRepository;
+import rule.engine.org.app.domain.repository.RuleConditionGroupRepository;
+import rule.engine.org.app.domain.repository.RuleConditionRepository;
+import rule.engine.org.app.domain.repository.RuleOutputRepository;
+import rule.engine.org.app.domain.repository.RuleOutputGroupRepository;
+import rule.engine.org.app.domain.repository.KieContainerVersionRepository;
+import rule.engine.org.app.domain.service.RuleEngineManager;
+import rule.engine.org.app.domain.service.RuleVersionService;
+import rule.engine.org.app.domain.entity.ui.KieContainerVersion;
+import rule.engine.org.app.util.RuleFieldExtractor;
+import rule.engine.org.app.util.DrlConstants;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/v1/rules")
+public class RuleController {
+
+    private static final Logger log = LoggerFactory.getLogger(RuleController.class);
+
+    private final DecisionRuleRepository decisionRuleRepository;
+    private final RuleExecutionResultRepository executionResultRepository;
+    private final RuleEngineManager ruleEngineManager;
+    private final RuleVersionService ruleVersionService;
+    private final RuleConditionGroupRepository conditionGroupRepository;
+    private final RuleConditionRepository conditionRepository;
+    private final RuleOutputRepository outputRepository;
+    private final RuleOutputGroupRepository outputGroupRepository;
+    private final KieContainerVersionRepository containerVersionRepository;
+
+    public RuleController(DecisionRuleRepository decisionRuleRepository,
+                        RuleExecutionResultRepository executionResultRepository,
+                        RuleEngineManager ruleEngineManager,
+                        RuleVersionService ruleVersionService,
+                        RuleConditionGroupRepository conditionGroupRepository,
+                        RuleConditionRepository conditionRepository,
+                        RuleOutputRepository outputRepository,
+                        RuleOutputGroupRepository outputGroupRepository,
+                        KieContainerVersionRepository containerVersionRepository) {
+        this.decisionRuleRepository = decisionRuleRepository;
+        this.executionResultRepository = executionResultRepository;
+        this.ruleEngineManager = ruleEngineManager;
+        this.ruleVersionService = ruleVersionService;
+        this.conditionGroupRepository = conditionGroupRepository;
+        this.conditionRepository = conditionRepository;
+        this.outputRepository = outputRepository;
+        this.outputGroupRepository = outputGroupRepository;
+        this.containerVersionRepository = containerVersionRepository;
+    }
+
+    @GetMapping
+    public List<DecisionRule> getAllRules(
+            @RequestParam(required = false, defaultValue = "true") Boolean latestOnly) {
+        if (latestOnly) {
+            return ruleVersionService.getAllLatestRules();
+        }
+        return decisionRuleRepository.findAll();
+    }
+
+    /**
+     * Execute rules with Declaration data
+     * This endpoint accepts Declaration data and fires all matching rules
+     * IMPORTANT: This endpoint must be placed BEFORE endpoints with path variables like /{id} or /{ruleId}/executions
+     * to avoid path matching conflicts (Spring may match /execute with /{ruleId}/executions)
+     */
+    @PostMapping(value = "/execute", consumes = org.springframework.http.MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> executeRules(
+            @RequestBody Map<String, Object> declarationData) {
+        try {
+            // Convert map to Declaration entity
+            rule.engine.org.app.domain.entity.execution.declaration.Declaration declaration = 
+                buildDeclarationFromMap(declarationData);
+            
+            // Get fact type from declaration data or default to "Declaration"
+            String factTypeStr = (String) declarationData.getOrDefault("factType", "Declaration");
+            FactType factType = FactType.fromValue(factTypeStr);
+            
+            // Fire rules using RuleEngineManager
+            rule.engine.org.app.domain.entity.execution.TotalRuleResults results = 
+                ruleEngineManager.fireRules(factType.getValue(), declaration);
+            
+            // Build response using DTO factory method
+            RuleExecuteResponse response = RuleExecuteResponse.from(results, declaration.getDeclarationId());
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            ErrorResponse errorResponse = ErrorResponse.builder()
+                .success(false)
+                .error(e.getMessage())
+                .errorType(e.getClass().getName())
+                .build();
+            log.error("Error executing rules", e);
+            return ResponseEntity.status(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(errorResponse);
+        }
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<RuleResponse> getRule(@PathVariable Long id) {
+        Optional<DecisionRule> ruleOpt = decisionRuleRepository.findById(id);
+        
+        if (ruleOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        
+        DecisionRule rule = ruleOpt.get();
+        
+        // Refresh rule from database to ensure all associations are loaded
+        decisionRuleRepository.flush();
+        rule = decisionRuleRepository.findById(id).orElse(rule);
+        
+        // Build response using DTO (no request)
+        RuleResponse response = buildRuleResponseInternal(rule, null);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> createRule(@RequestBody CreateRuleRequest request) {
+        // Build DecisionRule from request DTO
+        DecisionRule rule = buildRuleFromRequest(request);
+        
+        // Check for duplicate rule name (only check latest versions)
+        if (rule.getRuleName() != null) {
+            Optional<DecisionRule> existingRule = decisionRuleRepository.findByRuleNameAndIsLatestTrue(rule.getRuleName());
+            if (existingRule.isPresent()) {
+                ErrorResponse errorResponse = ErrorResponse.builder()
+                    .success(false)
+                    .error("Rule name already exists")
+                    .errorType("ValidationException")
+                    .build();
+                return ResponseEntity.badRequest().body(errorResponse);
+            }
+        }
+        
+        // Generate ruleContent before saving (uses placeholder ID 0 if rule not yet saved)
+        String ruleContent = buildCompleteDrlFromRequest(request, rule);
+        if (ruleContent == null || ruleContent.isBlank()) {
+            ErrorResponse errorResponse = ErrorResponse.builder()
+                .success(false)
+                .error("Failed to generate rule content: conditions or output are required")
+                .errorType("ValidationException")
+                .build();
+            return ResponseEntity.badRequest().body(errorResponse);
+        }
+        rule.setRuleContent(ruleContent);
+        
+        // Save DecisionRule (now with ruleContent)
+        DecisionRule saved = decisionRuleRepository.save(rule);
+        
+        // Rebuild ruleContent with correct rule ID (if ID was used as placeholder)
+        if (saved.getId() != null && saved.getId() != 0L) {
+            String updatedRuleContent = buildCompleteDrlFromRequest(request, saved);
+            if (updatedRuleContent != null && !updatedRuleContent.isBlank()) {
+                saved.setRuleContent(updatedRuleContent);
+                saved = decisionRuleRepository.save(saved);
+            }
+        }
+        
+        // Parse and save conditions if provided
+        if (request.getConditions() != null && !request.getConditions().isEmpty()) {
+            try {
+                saveRuleConditions(saved, request.getConditions());
+                conditionGroupRepository.flush(); // Ensure conditions are persisted
+                conditionRepository.flush(); // Ensure conditions are persisted
+                log.info("Successfully saved {} conditions for rule {}", 
+                    request.getConditions().size(), saved.getId());
+            } catch (Exception ex) {
+                log.error("Failed to persist structured conditions for rule {}: {}", saved.getRuleName(), ex.getMessage(), ex);
+                throw ex; // Re-throw to fail the request
+            }
+        }
+        
+        // Parse and save outputs if provided
+        if (request.getOutput() != null) {
+            try {
+                saveRuleOutputs(saved, request.getOutput());
+                outputRepository.flush(); // Ensure outputs are persisted
+            } catch (Exception ex) {
+                log.warn("Failed to persist rule outputs for rule {}: {}", saved.getRuleName(), ex.getMessage());
+            }
+        }
+        
+        // Flush all changes before reloading
+        decisionRuleRepository.flush();
+        
+        // Rebuild rules for this fact type
+        FactType factType = saved.getFactType() != null ? saved.getFactType() : FactType.DECLARATION;
+        ruleEngineManager.rebuildRules(factType.getValue());
+        
+        // Reload rule from database to ensure all associations are loaded
+        saved = decisionRuleRepository.findById(saved.getId()).orElse(saved);
+        
+        // Build response using DTO
+        RuleResponse response = buildRuleResponse(saved, request);
+        return ResponseEntity.ok(response);
+    }
+
+    @PutMapping("/{id}")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> updateRule(
+            @PathVariable Long id, 
+            @RequestBody UpdateRuleRequest request) {
+        if (!decisionRuleRepository.existsById(id)) {
+            return ResponseEntity.notFound().build();
+        }
+        
+        // Extract createNewVersion flag (default: true for versioning)
+        Boolean createNewVersion = request.getCreateNewVersion() != null ? request.getCreateNewVersion() : true;
+        String versionNotes = request.getVersionNotes();
+        
+        // Build DecisionRule from request DTO
+        DecisionRule rule = buildRuleFromRequest(request);
+        
+        // Check for duplicate rule name (only check latest versions, exclude current rule and its versions)
+        if (rule.getRuleName() != null) {
+            Optional<DecisionRule> existingRule = decisionRuleRepository.findByRuleNameAndIsLatestTrue(rule.getRuleName());
+            if (existingRule.isPresent()) {
+                DecisionRule existing = existingRule.get();
+                DecisionRule currentRule = decisionRuleRepository.findById(id).orElse(null);
+                
+                // If creating new version, exclude parent rule and its versions
+                // If updating directly, exclude only the current rule
+                if (createNewVersion && currentRule != null) {
+                    // Get parent rule ID of current rule (if current rule is a version, use its parent; otherwise use current rule ID)
+                    Long currentParentId = currentRule.getParentRuleId() != null ? currentRule.getParentRuleId() : currentRule.getId();
+                    Long existingParentId = existing.getParentRuleId() != null ? existing.getParentRuleId() : existing.getId();
+                    
+                    // Only error if existing rule is NOT a version of the current rule
+                    if (!currentParentId.equals(existingParentId)) {
+                        ErrorResponse errorResponse = ErrorResponse.builder()
+                            .success(false)
+                            .error("Rule name already exists")
+                            .errorType("ValidationException")
+                            .build();
+                        return ResponseEntity.badRequest().body(errorResponse);
+                    }
+                } else {
+                    // Exclude only if it's a different rule
+                    if (!existing.getId().equals(id)) {
+                        ErrorResponse errorResponse = ErrorResponse.builder()
+                            .success(false)
+                            .error("Rule name already exists")
+                            .errorType("ValidationException")
+                            .build();
+                        return ResponseEntity.badRequest().body(errorResponse);
+                    }
+                }
+            }
+        }
+        
+        // Generate ruleContent before saving
+        rule.setId(id); // Set ID for ruleContent generation (needed for both createNewVersion and direct update)
+        String ruleContent = buildCompleteDrlFromRequest(request, rule);
+        if (ruleContent == null || ruleContent.isBlank()) {
+            ErrorResponse errorResponse = ErrorResponse.builder()
+                .success(false)
+                .error("Failed to generate rule content: conditions or output are required")
+                .errorType("ValidationException")
+                .build();
+            return ResponseEntity.badRequest().body(errorResponse);
+        }
+        rule.setRuleContent(ruleContent);
+        
+        DecisionRule saved;
+        if (createNewVersion) {
+            // Create new version instead of updating existing rule
+            saved = ruleVersionService.createNewVersion(id, rule, versionNotes);
+            // Rebuild ruleContent with correct rule ID (new version will have new ID)
+            if (saved.getId() != null && !saved.getId().equals(id)) {
+                String updatedRuleContent = buildCompleteDrlFromRequest(request, saved);
+                if (updatedRuleContent != null && !updatedRuleContent.isBlank()) {
+                    saved.setRuleContent(updatedRuleContent);
+                    saved = decisionRuleRepository.save(saved);
+                }
+            }
+        } else {
+            // Direct update (no versioning)
+            saved = decisionRuleRepository.save(rule);
+        }
+        
+        // Parse and save conditions if provided
+        if (request.getConditions() != null && !request.getConditions().isEmpty()) {
+            try {
+                saveRuleConditions(saved, request.getConditions());
+                conditionGroupRepository.flush(); // Ensure conditions are persisted
+                conditionRepository.flush(); // Ensure conditions are persisted
+                log.info("Successfully saved {} conditions for rule {}", 
+                    request.getConditions().size(), saved.getId());
+            } catch (Exception ex) {
+                log.error("Failed to persist structured conditions for rule {}: {}", saved.getRuleName(), ex.getMessage(), ex);
+                throw ex; // Re-throw to fail the request
+            }
+        }
+        
+        // Parse and save outputs if provided
+        if (request.getOutput() != null) {
+            try {
+                saveRuleOutputs(saved, request.getOutput());
+                outputRepository.flush(); // Ensure outputs are persisted
+            } catch (Exception ex) {
+                log.warn("Failed to persist rule outputs for rule {}: {}", saved.getRuleName(), ex.getMessage());
+            }
+        }
+        
+        // Flush all changes before reloading
+        decisionRuleRepository.flush();
+        
+        // Rebuild rules for this fact type
+        FactType factType = saved.getFactType() != null ? saved.getFactType() : FactType.DECLARATION;
+        ruleEngineManager.rebuildRules(factType.getValue());
+        
+        // Reload rule from database to ensure all associations are loaded
+        saved = decisionRuleRepository.findById(saved.getId()).orElse(saved);
+        
+        // Build response using DTO
+        RuleResponse response = buildRuleResponse(saved, request);
+        return ResponseEntity.ok(response);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteRule(@PathVariable Long id) {
+        if (!decisionRuleRepository.existsById(id)) {
+            return ResponseEntity.notFound().build();
+        }
+        // Get fact type before deleting
+        DecisionRule rule = decisionRuleRepository.findById(id).orElse(null);
+        FactType factType = rule != null && rule.getFactType() != null ? rule.getFactType() : FactType.DECLARATION;
+        decisionRuleRepository.deleteById(id);
+        ruleEngineManager.rebuildRules(factType.getValue()); // Rebuild rules for this fact type
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/refresh")
+    public ResponseEntity<String> refreshRules(
+            @RequestParam(required = false) String factType) {
+        if (factType != null && !factType.isEmpty()) {
+            ruleEngineManager.rebuildRules(factType);
+        } else {
+            ruleEngineManager.rebuildRules(); // Rebuild all fact types
+        }
+        return ResponseEntity.ok("Rules refreshed successfully");
+    }
+
+    @PostMapping("/deploy")
+    public ResponseEntity<DeployResponse> deployRules(
+            @RequestParam(required = false) String factType) {
+        if (factType != null && !factType.isEmpty()) {
+            ruleEngineManager.deployRules(factType);
+        } else {
+            ruleEngineManager.deployRules(); // Deploy all fact types
+        }
+        
+        // Get updated package info after deploy
+        FactType targetFactType = factType != null && !factType.isEmpty() 
+            ? FactType.fromValue(factType) : FactType.DECLARATION;
+        long currentVersion = ruleEngineManager.getContainerVersion(targetFactType.getValue());
+        String releaseId = ruleEngineManager.getContainerReleaseId(targetFactType.getValue());
+        
+        // Build response using DTO
+        DeployResponse.DeployResponseBuilder responseBuilder = DeployResponse.builder()
+            .version(currentVersion)
+            .releaseId(releaseId)
+            .message("Rules deployed successfully");
+        
+        // Get latest version from database for this fact type
+        Optional<KieContainerVersion> latestVersion = containerVersionRepository.findLatestVersionByFactType(targetFactType.getValue());
+        if (latestVersion.isPresent()) {
+            KieContainerVersion version = latestVersion.get();
+            responseBuilder.rulesCount(version.getRulesCount())
+                .changesDescription(version.getChangesDescription())
+                .deployedAt(version.getCreatedAt());
+        }
+        
+        return ResponseEntity.ok(responseBuilder.build());
+    }
+
+    @GetMapping("/package/info")
+    public ResponseEntity<PackageInfoResponse> getPackageInfo(
+            @RequestParam(required = false, defaultValue = "Declaration") String factType) {
+        // Get current container info from RuleEngineManager
+        FactType factTypeEnum = FactType.fromValue(factType);
+        long currentVersion = ruleEngineManager.getContainerVersion(factTypeEnum.getValue());
+        String releaseId = ruleEngineManager.getContainerReleaseId(factTypeEnum.getValue());
+        
+        // Extract package name from ReleaseId (format: groupId:artifactId:version)
+        String packageName = "rules"; // Default fallback
+        if (releaseId != null && releaseId.contains(":")) {
+            String[] parts = releaseId.split(":");
+            if (parts.length >= 1) {
+                packageName = parts[0]; // Use groupId as package name
+            }
+        }
+        
+        PackageInfoResponse.PackageInfoResponseBuilder responseBuilder = PackageInfoResponse.builder()
+            .version(currentVersion)
+            .releaseId(releaseId)
+            .packageName(packageName)
+            .factType(factTypeEnum.getValue());
+        
+        // Get latest version from database for this fact type
+        Optional<KieContainerVersion> latestVersion = containerVersionRepository.findLatestVersionByFactType(factTypeEnum.getValue());
+        if (latestVersion.isPresent()) {
+            KieContainerVersion version = latestVersion.get();
+            responseBuilder.rulesCount(version.getRulesCount())
+                .rulesHash(version.getRulesHash())
+                .changesDescription(version.getChangesDescription())
+                .ruleIds(version.getRuleIds())
+                .deployedAt(version.getCreatedAt())
+                .deployedBy(version.getCreatedBy());
+            
+            // Parse rule changes JSON for current version
+            if (version.getRuleChangesJson() != null && !version.getRuleChangesJson().isEmpty()) {
+                try {
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> changes = mapper.readValue(version.getRuleChangesJson(), Map.class);
+                    responseBuilder.ruleChanges(changes);
+                } catch (Exception e) {
+                    // Ignore parsing errors
+                }
+            }
+        }
+        
+        // Get all versions history for this fact type
+        List<KieContainerVersion> allVersions = containerVersionRepository.findAllByFactTypeOrderByVersionDesc(factTypeEnum);
+        List<PackageInfoResponse.VersionHistoryItem> versionHistory = allVersions.stream()
+            .map(v -> {
+                PackageInfoResponse.VersionHistoryItem.VersionHistoryItemBuilder itemBuilder = 
+                    PackageInfoResponse.VersionHistoryItem.builder()
+                        .version(v.getVersion())
+                        .rulesCount(v.getRulesCount())
+                        .releaseId(v.getReleaseId())
+                        .changesDescription(v.getChangesDescription())
+                        .ruleIds(v.getRuleIds())
+                        .deployedAt(v.getCreatedAt())
+                        .deployedBy(v.getCreatedBy());
+                
+                // Parse rule changes JSON if available
+                if (v.getRuleChangesJson() != null && !v.getRuleChangesJson().isEmpty()) {
+                    try {
+                        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> changes = mapper.readValue(v.getRuleChangesJson(), Map.class);
+                        itemBuilder.ruleChanges(changes);
+                    } catch (Exception e) {
+                        // Ignore parsing errors
+                    }
+                }
+                
+                return itemBuilder.build();
+            })
+            .collect(Collectors.toList());
+        responseBuilder.versionHistory(versionHistory);
+        
+        return ResponseEntity.ok(responseBuilder.build());
+    }
+    
+    /**
+     * Get all available fact types
+     * Returns fact types from database (all fact types that have rules) merged with default fact types
+     * This endpoint is used by UI to populate fact type dropdowns
+     */
+    @GetMapping("/fact-types")
+    public ResponseEntity<List<String>> getFactTypes() {
+        // Get fact types from database (all fact types that have rules)
+        List<FactType> factTypesFromDb = decisionRuleRepository.findDistinctFactTypes();
+        
+        // Default fact types that are always available (even if no rules exist yet)
+        java.util.Set<FactType> defaultFactTypes = new java.util.HashSet<>(java.util.Arrays.asList(FactType.DECLARATION, FactType.CARGO_REPORT));
+        
+        // Merge: combine fact types from database with default fact types
+        java.util.Set<FactType> allFactTypes = new java.util.HashSet<>(defaultFactTypes);
+        if (factTypesFromDb != null && !factTypesFromDb.isEmpty()) {
+            allFactTypes.addAll(factTypesFromDb);
+        }
+        
+        // Convert to sorted list of string values for consistent ordering
+        List<String> sortedFactTypes = allFactTypes.stream()
+            .map(FactType::getValue)
+            .sorted()
+            .collect(java.util.stream.Collectors.toList());
+        
+        return ResponseEntity.ok(sortedFactTypes);
+    }
+    
+    /**
+     * Get status of all KieContainers
+     * Shows which fact types have containers and their status
+     */
+    @GetMapping("/containers/status")
+    public ResponseEntity<ContainerStatusResponse> getAllContainersStatus() {
+        Map<String, Map<String, Object>> containersStatus = ruleEngineManager.getAllContainersStatus();
+        
+        // Get fact types from database (all fact types that have rules)
+        List<FactType> factTypesFromDb = decisionRuleRepository.findDistinctFactTypes();
+        
+        // Default fact types that are always available (even if no rules exist yet)
+        java.util.Set<FactType> defaultFactTypes = new java.util.HashSet<>(java.util.Arrays.asList(FactType.DECLARATION, FactType.CARGO_REPORT));
+        
+        // Merge: combine fact types from database with default fact types
+        java.util.Set<FactType> allFactTypes = new java.util.HashSet<>(defaultFactTypes);
+        if (factTypesFromDb != null && !factTypesFromDb.isEmpty()) {
+            allFactTypes.addAll(factTypesFromDb);
+        }
+        
+        // Convert to sorted list of string values for consistent ordering
+        List<String> sortedFactTypes = allFactTypes.stream()
+            .map(FactType::getValue)
+            .sorted()
+            .collect(java.util.stream.Collectors.toList());
+        
+        List<ContainerStatusResponse.ContainerStatus> containerStatuses = containersStatus.entrySet().stream()
+            .sorted(java.util.Map.Entry.comparingByKey())
+            .map(entry -> buildContainerStatus(entry.getKey(), entry.getValue()))
+            .collect(java.util.stream.Collectors.toList());
+        
+        ContainerStatusResponse response = ContainerStatusResponse.builder()
+            .containers(containerStatuses)
+            .totalContainers(containerStatuses.size())
+            .factTypes(sortedFactTypes)
+            .build();
+        
+        return ResponseEntity.ok(response);
+    }
+    
+    /**
+     * Get status of a specific KieContainer by fact type
+     */
+    @GetMapping("/containers/status/{factType}")
+    public ResponseEntity<Map<String, Object>> getContainerStatus(@PathVariable String factType) {
+        Map<String, Object> status = ruleEngineManager.getContainerStatus(factType);
+        return ResponseEntity.ok(status);
+    }
+    
+    private ContainerStatusResponse.ContainerStatus buildContainerStatus(
+        String factType,
+        Map<String, Object> statusMap
+    ) {
+        if (statusMap == null) {
+            return ContainerStatusResponse.ContainerStatus.builder()
+                .factType(factType)
+                .exists(Boolean.FALSE)
+                .valid(Boolean.FALSE)
+                .message("Container not found for fact type: " + factType)
+                .build();
+        }
+        
+        return ContainerStatusResponse.ContainerStatus.builder()
+            .factType(factType)
+            .exists(asBoolean(statusMap.get("exists")))
+            .valid(asBoolean(statusMap.get("valid")))
+            .version(asLong(statusMap.get("version")))
+            .releaseId(asString(statusMap.get("releaseId")))
+            .rulesHash(asString(statusMap.get("rulesHash")))
+            .ruleCount(asInteger(statusMap.get("ruleCount")))
+            .message(asString(statusMap.get("message")))
+            .error(asString(statusMap.get("error")))
+            .build();
+    }
+    
+    private Boolean asBoolean(Object value) {
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
+        }
+        if (value instanceof String stringValue) {
+            return Boolean.parseBoolean(stringValue);
+        }
+        return null;
+    }
+    
+    private Long asLong(Object value) {
+        if (value instanceof Number numberValue) {
+            return numberValue.longValue();
+        }
+        if (value instanceof String stringValue) {
+            try {
+                return Long.parseLong(stringValue);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+    
+    private Integer asInteger(Object value) {
+        if (value instanceof Number numberValue) {
+            return numberValue.intValue();
+        }
+        if (value instanceof String stringValue) {
+            try {
+                return Integer.parseInt(stringValue);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+    
+    private String asString(Object value) {
+        return value != null ? value.toString() : null;
+    }
+    
+    /**
+     * Verify a KieContainer can fire rules
+     * Tests if container can create session and execute rules
+     */
+    @GetMapping("/containers/verify/{factType}")
+    public ResponseEntity<Map<String, Object>> verifyContainer(@PathVariable String factType) {
+        Map<String, Object> result = ruleEngineManager.verifyContainer(factType);
+        if ((Boolean) result.getOrDefault("success", false)) {
+            return ResponseEntity.ok(result);
+        } else {
+            return ResponseEntity.status(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE).body(result);
+        }
+    }
+
+    @GetMapping("/active")
+    public List<DecisionRule> getActiveRules() {
+        return decisionRuleRepository.findByActiveTrue();
+    }
+
+    @GetMapping("/metadata")
+    public ResponseEntity<RuleFieldMetadata> getRuleFieldMetadata(
+            @RequestParam(required = false, defaultValue = "Declaration") String factType) {
+        // INPUT FIELDS - Automatically extracted from entity using reflection based on fact type
+        // These fields are from the entity corresponding to the fact type (Declaration, CargoReport, etc.)
+        FactType factTypeEnum = FactType.fromValue(factType);
+        List<FieldDefinition> inputFields = RuleFieldExtractor.extractInputFields(factTypeEnum.getValue());
+
+        // OUTPUT FIELDS - Automatically extracted from RuleOutputHit entity using reflection
+        // UI will display these fields in the THEN section form
+        List<FieldDefinition> outputFields = RuleFieldExtractor.extractOutputFields();
+
+        // OPERATORS - Get operators grouped by field type
+        var operatorsByType = RuleFieldExtractor.getOperatorsByType();
+
+        RuleFieldMetadata metadata = new RuleFieldMetadata(inputFields, outputFields, operatorsByType);
+        return ResponseEntity.ok(metadata);
+    }
+    
+    /**
+     * Build Declaration entity from map data using Jackson ObjectMapper
+     * This automatically maps all fields from Map to Declaration entity
+     * Unknown properties (like factType) are automatically ignored
+     */
+    private rule.engine.org.app.domain.entity.execution.declaration.Declaration buildDeclarationFromMap(
+            Map<String, Object> data) {
+        try {
+            // Use Jackson ObjectMapper to automatically convert Map to Declaration
+            // Configure to ignore unknown properties (like factType which is not a field of Declaration entity)
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+            
+            rule.engine.org.app.domain.entity.execution.declaration.Declaration declaration = 
+                mapper.convertValue(data, rule.engine.org.app.domain.entity.execution.declaration.Declaration.class);
+            
+            return declaration;
+        } catch (Exception e) {
+            log.error("Error converting Map to Declaration: {}", e.getMessage(), e);
+            throw new IllegalArgumentException("Invalid Declaration data: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Get execution history for a specific declaration
+     */
+    @GetMapping("/executions/declaration/{declarationId}")
+    public ResponseEntity<List<RuleExecutionResponse>> getExecutionsByDeclaration(@PathVariable String declarationId) {
+        List<RuleExecutionResult> results = executionResultRepository.findByDeclarationId(declarationId);
+        List<RuleExecutionResponse> responses = results.stream()
+            .map(this::toExecutionResponse)
+            .collect(Collectors.toList());
+        return ResponseEntity.ok(responses);
+    }
+
+    /**
+     * Get execution history for a specific rule
+     */
+    @GetMapping("/{ruleId}/executions")
+    public ResponseEntity<List<RuleExecutionResponse>> getExecutionsByRule(@PathVariable Long ruleId) {
+        List<RuleExecutionResult> results = executionResultRepository.findByDecisionRuleId(ruleId);
+        List<RuleExecutionResponse> responses = results.stream()
+            .map(this::toExecutionResponse)
+            .collect(Collectors.toList());
+        return ResponseEntity.ok(responses);
+    }
+
+    /**
+     * Get declarations flagged by a specific rule
+     */
+    @GetMapping("/{ruleId}/flagged")
+    public ResponseEntity<List<RuleExecutionResponse>> getFlaggedByRule(@PathVariable Long ruleId) {
+        List<RuleExecutionResult> results = executionResultRepository.findFlaggedByRule(ruleId);
+        List<RuleExecutionResponse> responses = results.stream()
+            .map(this::toExecutionResponse)
+            .collect(Collectors.toList());
+        return ResponseEntity.ok(responses);
+    }
+
+    /**
+     * Get count of how many times a rule has fired
+     */
+    @GetMapping("/{ruleId}/fire-count")
+    public ResponseEntity<Long> getRuleFireCount(@PathVariable Long ruleId) {
+        Long count = executionResultRepository.countRuleFires(ruleId);
+        return ResponseEntity.ok(count);
+    }
+
+    // ========== VERSION MANAGEMENT ENDPOINTS ==========
+    
+    /**
+     * Get version history for a specific rule
+     */
+    @GetMapping("/{id}/versions")
+    public ResponseEntity<List<DecisionRule>> getRuleVersions(@PathVariable Long id) {
+        try {
+            List<DecisionRule> versions = ruleVersionService.getVersionHistory(id);
+            return ResponseEntity.ok(versions);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+    
+    /**
+     * Get the latest version of a rule
+     */
+    @GetMapping("/{id}/versions/latest")
+    public ResponseEntity<DecisionRule> getLatestVersion(@PathVariable Long id) {
+        return ruleVersionService.getLatestVersion(id)
+            .map(ResponseEntity::ok)
+            .orElse(ResponseEntity.notFound().build());
+    }
+    
+    /**
+     * Restore an old version (creates a new version with the same content)
+     */
+    @PostMapping("/{id}/versions/restore")
+    public ResponseEntity<DecisionRule> restoreVersion(
+            @PathVariable Long id,
+            @RequestBody(required = false) RestoreVersionRequest request) {
+        try {
+            String versionNotes = request != null ? request.getVersionNotes() : null;
+            DecisionRule restored = ruleVersionService.restoreVersion(id, versionNotes);
+            // Rebuild rules for this fact type
+            FactType factType = restored.getFactType() != null ? restored.getFactType() : FactType.DECLARATION;
+            ruleEngineManager.rebuildRules(factType.getValue());
+            return ResponseEntity.ok(restored);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    // ========== HELPER METHODS ==========
+    
+    // Helper method to convert entity to DTO
+    private RuleExecutionResponse toExecutionResponse(RuleExecutionResult result) {
+        return new RuleExecutionResponse(
+            result.getId(),
+            result.getDeclarationId(),  // String identifier (not FK)
+            result.getDecisionRule().getId(),
+            result.getDecisionRule().getRuleName(),
+            result.getMatched(),
+            result.getRuleAction(),
+            result.getRuleResult(),
+            result.getRuleScore(),
+            result.getExecutedAt()
+        );
+    }
+    
+    /**
+     * Helper method to build DecisionRule from request DTO
+     * Only maps fields that are part of DecisionRule entity
+     */
+    private DecisionRule buildRuleFromRequest(CreateRuleRequest request) {
+        return buildRuleFromRequestInternal(request);
+    }
+    
+    /**
+     * Helper method to build DecisionRule from update request DTO
+     */
+    private DecisionRule buildRuleFromRequest(UpdateRuleRequest request) {
+        return buildRuleFromRequestInternal(request);
+    }
+    
+    /**
+     * Internal method to build DecisionRule from request DTO (works with both CreateRuleRequest and UpdateRuleRequest)
+     */
+    private DecisionRule buildRuleFromRequestInternal(Object request) {
+        try {
+            // Use Jackson ObjectMapper to convert DTO to DecisionRule
+            // Configure to ignore unknown properties (like description, conditions, output which are not fields of DecisionRule entity)
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+            DecisionRule rule = mapper.convertValue(request, DecisionRule.class);
+            
+            // Set factType if provided (default to DECLARATION)
+            FactType factType = null;
+            if (request instanceof CreateRuleRequest) {
+                factType = ((CreateRuleRequest) request).getFactType();
+            } else if (request instanceof UpdateRuleRequest) {
+                factType = ((UpdateRuleRequest) request).getFactType();
+            }
+            
+            if (factType != null) {
+                rule.setFactType(factType);
+            } else {
+                rule.setFactType(FactType.DECLARATION); // Default
+            }
+
+            return rule;
+        } catch (Exception e) {
+            log.error("Error converting request DTO to DecisionRule: {}", e.getMessage(), e);
+            throw new IllegalArgumentException("Invalid DecisionRule data: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Build complete DRL (Drools Rule Language) from request DTO
+     * Includes package, imports, globals, and rule definition
+     */
+    private String buildCompleteDrlFromRequest(CreateRuleRequest request, DecisionRule rule) {
+        return buildCompleteDrlFromRequestInternal(request, rule);
+    }
+    
+    /**
+     * Build complete DRL from update request DTO
+     */
+    private String buildCompleteDrlFromRequest(UpdateRuleRequest request, DecisionRule rule) {
+        return buildCompleteDrlFromRequestInternal(request, rule);
+    }
+    
+    /**
+     * Internal method to build complete DRL from request DTO
+     */
+    private String buildCompleteDrlFromRequestInternal(Object request, DecisionRule rule) {
+        // Build WHEN clause from conditions
+        FactType factType = rule.getFactType() != null ? rule.getFactType() : FactType.DECLARATION;
+        
+        List<Map<String, Object>> conditions = null;
+        Map<String, Object> output = null;
+        
+        if (request instanceof CreateRuleRequest) {
+            conditions = ((CreateRuleRequest) request).getConditions();
+            output = ((CreateRuleRequest) request).getOutput();
+        } else if (request instanceof UpdateRuleRequest) {
+            conditions = ((UpdateRuleRequest) request).getConditions();
+            output = ((UpdateRuleRequest) request).getOutput();
+        }
+        
+        String whenClause = buildWhenClauseFromConditions(conditions, factType.getValue());
+        if (whenClause == null || whenClause.isBlank()) {
+            return null;
+        }
+        
+        // Build THEN clause from output
+        String thenClause = buildThenClauseFromOutput(output, rule);
+        if (thenClause == null || thenClause.isBlank()) {
+            return null;
+        }
+        
+        // Build complete DRL with package, imports, globals, and rule definition
+        StringBuilder drl = new StringBuilder();
+        
+        // DRL header (package, imports, globals)
+        drl.append(DrlConstants.buildDrlHeader());
+        
+        // Rule definition
+        String ruleName = rule.getRuleName() != null ? rule.getRuleName() : "Rule";
+        // Use placeholder for rule ID if not yet saved (will be updated after save)
+        Long ruleId = rule.getId() != null ? rule.getId() : 0L;
+        int salience = rule.getPriority() != null ? rule.getPriority() : 0;
+        
+        drl.append("rule \"").append(ruleName).append("_").append(ruleId).append("\"\n");
+        drl.append("salience ").append(salience).append("\n");
+        drl.append("when\n");
+        drl.append("    ").append(whenClause).append("\n");
+        drl.append("then\n");
+        drl.append(thenClause);
+        drl.append("end\n");
+        
+        return drl.toString();
+    }
+    
+    /**
+     * Build WHEN clause from conditions array
+     */
+    private String buildWhenClauseFromConditions(List<Map<String, Object>> conditions, String factType) {
+        if (conditions == null || conditions.isEmpty()) {
+            return null;
+        }
+        return generateWhenExprFromConditions(conditions, factType);
+    }
+    
+    /**
+     * Build THEN clause from output object
+     */
+    private String buildThenClauseFromOutput(Map<String, Object> output, DecisionRule rule) {
+        if (output == null) {
+            output = new java.util.HashMap<>();
+        }
+        
+        // Build THEN clause
+        StringBuilder then = new StringBuilder();
+        
+        // Create RuleOutputHit and set fields
+        then.append("    RuleOutputHit output = new RuleOutputHit();\n");
+        
+        String action = output.get("action") != null ? output.get("action").toString() : "FLAG";
+        then.append("    output.setAction(\"").append(escapeJavaString(action)).append("\");\n");
+        
+        String result = output.get("result") != null ? output.get("result").toString()
+            : "Rule '" + (rule.getRuleName() != null ? rule.getRuleName() : "Unknown") + "' matched";
+        then.append("    output.setResult(\"").append(escapeJavaString(result)).append("\");\n");
+        
+        Object scoreObj = output.get("score");
+        String score = "0";
+        if (scoreObj != null) {
+            if (scoreObj instanceof Number) {
+                score = scoreObj.toString();
+            } else {
+                score = scoreObj.toString();
+            }
+        }
+        then.append("    output.setScore(new BigDecimal(\"").append(score).append("\"));\n");
+        
+        // Set optional fields
+        if (output.get("flag") != null) {
+            then.append("    output.setFlag(\"").append(escapeJavaString(output.get("flag").toString())).append("\");\n");
+        }
+        if (output.get("documentType") != null) {
+            then.append("    output.setDocumentType(\"").append(escapeJavaString(output.get("documentType").toString())).append("\");\n");
+        }
+        if (output.get("documentId") != null) {
+            then.append("    output.setDocumentId(\"").append(escapeJavaString(output.get("documentId").toString())).append("\");\n");
+        }
+        if (output.get("description") != null) {
+            then.append("    output.setDescription(\"").append(escapeJavaString(output.get("description").toString())).append("\");\n");
+        }
+        
+        // Add to totalResults
+        then.append("    totalResults.getHits().add(output);\n");
+        
+        // Log rule match
+        then.append("    System.out.println(\"[DROOLS] Rule '").append(rule.getRuleName() != null ? rule.getRuleName() : "Unknown")
+            .append("' matched for declaration: \" + $d.getDeclarationId());\n");
+        
+        return then.toString();
+    }
+    
+    private String escapeJavaString(String str) {
+        if (str == null) return "";
+        return str.replace("\\", "\\\\")
+                  .replace("\"", "\\\"")
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+                  .replace("\t", "\\t");
+    }
+    
+    private String generateWhenExprFromConditions(List<Map<String, Object>> conditions, String factType) {
+        if (conditions == null || conditions.isEmpty()) {
+            return null;
+        }
+
+        // Build a lookup of field types for quoting values correctly
+        // Use factType to extract correct fields
+        FactType factTypeEnum = factType != null && !factType.isEmpty() 
+            ? FactType.fromValue(factType) : FactType.DECLARATION;
+        Map<String, String> fieldTypeByName = RuleFieldExtractor.extractInputFields(factTypeEnum.getValue()).stream()
+            .collect(Collectors.toMap(FieldDefinition::getName, FieldDefinition::getType, (a, b) -> a));
+
+        StringBuilder conditionBuilder = new StringBuilder();
+        for (int i = 0; i < conditions.size(); i++) {
+            Map<String, Object> condition = conditions.get(i);
+            Object fieldObj = condition.get("field");
+            Object operatorObj = condition.get("operator");
+            if (fieldObj == null || operatorObj == null) {
+                continue;
+            }
+
+            String field = fieldObj.toString();
+            String operator = operatorObj.toString();
+            Object valueObj = condition.get("value");
+
+            // Convert field path from declaration.fieldName to $d.fieldName for Drools
+            // e.g., declaration.importerName -> $d.importerName
+            // e.g., declaration.governmentAgencyGoodsItems.customsValueAmount -> $d.governmentAgencyGoodsItems.customsValueAmount
+            String droolsFieldPath = field;
+            if (field.startsWith("declaration.")) {
+                droolsFieldPath = "$d." + field.substring("declaration.".length());
+            }
+
+            String fieldType = fieldTypeByName.getOrDefault(field, "string");
+            String valueExpression = buildValueExpression(valueObj, fieldType);
+
+            if (valueExpression == null) {
+                continue;
+            }
+
+            conditionBuilder.append(droolsFieldPath).append(' ').append(operator).append(' ').append(valueExpression);
+
+            if (i < conditions.size() - 1) {
+                String logicalOp = String.valueOf(condition.getOrDefault("logicalOp", "AND"));
+                conditionBuilder.append(logicalOp.equalsIgnoreCase("OR") ? " || " : " && ");
+            }
+        }
+
+        if (conditionBuilder.length() == 0) {
+            return null;
+        }
+
+        // Determine fact type variable and class name based on factType
+        String factVariable;
+        String factClassName;
+        if (factTypeEnum == FactType.CARGO_REPORT) {
+            factVariable = "$c";
+            factClassName = "CargoReport";
+        } else {
+            factVariable = "$d";
+            factClassName = "Declaration";
+        }
+
+        return factVariable + " : " + factClassName + "(" + conditionBuilder + ")";
+    }
+
+    private String buildValueExpression(Object valueObj, String fieldType) {
+        if (valueObj == null) {
+            return "null";
+        }
+
+        switch (fieldType) {
+            case "integer":
+            case "decimal":
+                return valueObj.toString();
+            case "boolean":
+                return String.valueOf(valueObj);
+            default:
+                String escaped = valueObj.toString()
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\"");
+                return "\"" + escaped + "\"";
+        }
+    }
+    
+    /**
+     * Parse and save rule conditions from request body
+     * Supports structured format (conditions array)
+     */
+    @org.springframework.transaction.annotation.Transactional
+    private void saveRuleConditions(DecisionRule rule, List<Map<String, Object>> conditions) {
+        // Delete existing conditions first
+        List<RuleConditionGroup> existingGroups = conditionGroupRepository.findByDecisionRuleIdOrderByOrderIndexAsc(rule.getId());
+        for (RuleConditionGroup group : existingGroups) {
+            conditionRepository.deleteAll(conditionRepository.findByGroupOrderByOrderIndexAsc(group));
+        }
+        conditionGroupRepository.deleteAll(existingGroups);
+        
+        // Parse conditions from structured format
+        if (conditions != null && !conditions.isEmpty()) {
+                // Group conditions by logical operator (AND/OR)
+                // Create groups based on logicalOp transitions
+                RuleConditionGroup currentGroup = null;
+                RuleGroupType currentGroupType = RuleGroupType.AND;
+                int groupOrderIndex = 0;
+                int conditionOrderIndex = 0;
+                
+                for (Map<String, Object> cond : conditions) {
+                    if (!cond.containsKey("field") || !cond.containsKey("operator") || !cond.containsKey("value")) {
+                        continue;
+                    }
+                    
+                    // Get logical operator for this condition (default to AND)
+                    String logicalOp = (String) cond.getOrDefault("logicalOp", "AND");
+                    RuleGroupType groupType = "OR".equals(logicalOp) ? RuleGroupType.OR : RuleGroupType.AND;
+                    
+                    // Create new group if operator changed or first condition
+                    if (currentGroup == null || !currentGroupType.equals(groupType)) {
+                        currentGroup = new RuleConditionGroup();
+                        currentGroup.setDecisionRule(rule);
+                        currentGroup.setType(groupType);
+                        currentGroup.setOrderIndex(groupOrderIndex++);
+                        currentGroup = conditionGroupRepository.save(currentGroup);
+                        currentGroupType = groupType;
+                        conditionOrderIndex = 0; // Reset condition order within group
+                    }
+                    
+                    // Parse and save condition
+                    RuleCondition condition = parseConditionFromMap(cond, currentGroup, conditionOrderIndex++);
+                    conditionRepository.save(condition);
+                }
+            }
+        }
+    
+    /**
+     * Map operator string to RuleOperatorType enum
+     */
+    private RuleOperatorType mapOperator(String operatorStr) {
+        return switch (operatorStr) {
+            case "==" -> RuleOperatorType.EQUALS;
+            case "!=" -> RuleOperatorType.NOT_EQUALS;
+            case ">" -> RuleOperatorType.GT;
+            case ">=" -> RuleOperatorType.GTE;
+            case "<" -> RuleOperatorType.LT;
+            case "<=" -> RuleOperatorType.LTE;
+            case "contains" -> RuleOperatorType.STR_CONTAINS;
+            case "startsWith" -> RuleOperatorType.STR_STARTS_WITH;
+            case "endsWith" -> RuleOperatorType.STR_ENDS_WITH;
+            default -> RuleOperatorType.EQUALS;
+        };
+    }
+    
+    /**
+     * Parse condition from structured map format
+     */
+    private RuleCondition parseConditionFromMap(Map<String, Object> cond, RuleConditionGroup group, int orderIndex) {
+        RuleCondition condition = new RuleCondition();
+        condition.setGroup(group);
+        condition.setFieldPath((String) cond.get("field"));
+        condition.setOrderIndex(orderIndex);
+        
+        // Map operator
+        String operatorStr = (String) cond.get("operator");
+        condition.setOperator(mapOperator(operatorStr));
+        
+        // Parse value
+        Object value = cond.get("value");
+        if (value == null) {
+            condition.setValueType(RuleValueType.STRING);
+            condition.setValueText(null);
+        } else if (value instanceof String) {
+            condition.setValueType(RuleValueType.STRING);
+            condition.setValueText((String) value);
+        } else if (value instanceof Number) {
+            if (value instanceof Integer || value instanceof Long) {
+                condition.setValueType(RuleValueType.INT);
+                condition.setValueNumber(((Number) value).longValue());
+            } else {
+                condition.setValueType(RuleValueType.BIG_DECIMAL);
+                condition.setValueDecimal(new java.math.BigDecimal(value.toString()));
+            }
+        } else if (value instanceof Boolean) {
+            condition.setValueType(RuleValueType.BOOLEAN);
+            condition.setValueBoolean((Boolean) value);
+        } else {
+            condition.setValueType(RuleValueType.STRING);
+            condition.setValueText(value.toString());
+        }
+        
+        return condition;
+    }
+    
+    /**
+     * Parse and save rule outputs from request body
+     */
+    @org.springframework.transaction.annotation.Transactional
+    private void saveRuleOutputs(DecisionRule rule, Map<String, Object> outputMap) {
+        // Delete existing outputs and groups first
+        List<RuleOutput> existingOutputs = outputRepository.findByDecisionRuleIdOrderByOrderIndexAsc(rule.getId());
+        outputRepository.deleteAll(existingOutputs);
+        List<RuleOutputGroup> existingGroups = outputGroupRepository.findByDecisionRuleIdOrderByOrderIndexAsc(rule.getId());
+        outputGroupRepository.deleteAll(existingGroups);
+        
+        if (outputMap != null) {
+            // Create output group first
+            RuleOutputGroup outputGroup = new RuleOutputGroup();
+            outputGroup.setDecisionRule(rule);
+            outputGroup.setType(RuleGroupType.AND);
+            outputGroup.setOrderIndex(0);
+            outputGroup = outputGroupRepository.save(outputGroup);
+            
+            // Convert Map to DTO using ObjectMapper
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            RuleOutputRequest outputRequest = mapper.convertValue(outputMap, RuleOutputRequest.class);
+            
+            // Create RuleOutput entity from DTO
+            RuleOutput ruleOutput = new RuleOutput();
+            ruleOutput.setGroup(outputGroup);
+            ruleOutput.setDecisionRule(rule);
+            ruleOutput.setOrderIndex(0);
+            ruleOutput.setAction(outputRequest.getAction());
+            ruleOutput.setResult(outputRequest.getResult());
+            ruleOutput.setScore(outputRequest.getScore());
+            ruleOutput.setFlag(outputRequest.getFlag());
+            ruleOutput.setDocumentType(outputRequest.getDocumentType());
+            ruleOutput.setDocumentId(outputRequest.getDocumentId());
+            ruleOutput.setDescription(outputRequest.getDescription());
+            
+            outputRepository.save(ruleOutput);
+        }
+    }
+    
+    /**
+     * Build RuleResponse DTO from DecisionRule entity
+     * Response includes all request fields plus id and timestamps
+     */
+    private RuleResponse buildRuleResponse(DecisionRule rule, CreateRuleRequest request) {
+        return buildRuleResponseInternal(rule, request);
+    }
+    
+    /**
+     * Build RuleResponse DTO from DecisionRule entity with update request
+     */
+    private RuleResponse buildRuleResponse(DecisionRule rule, UpdateRuleRequest request) {
+        return buildRuleResponseInternal(rule, request);
+    }
+    
+    /**
+     * Internal method to build RuleResponse from DecisionRule and optional request DTO
+     */
+    private RuleResponse buildRuleResponseInternal(DecisionRule rule, Object request) {
+        RuleResponse.RuleResponseBuilder responseBuilder = RuleResponse.builder()
+            .id(rule.getId())
+            .ruleName(rule.getRuleName())
+            .label(rule.getLabel())
+            .ruleContent(rule.getRuleContent())
+            .priority(rule.getPriority())
+            .active(rule.getActive())
+            .version(rule.getVersion())
+            .parentRuleId(rule.getParentRuleId())
+            .isLatest(rule.getIsLatest())
+            .versionNotes(rule.getVersionNotes())
+            .createdAt(rule.getCreatedAt())
+            .updatedAt(rule.getUpdatedAt())
+            .createdBy(rule.getCreatedBy())
+            .updatedBy(rule.getUpdatedBy());
+        
+        // Extract fields from request DTO if provided
+        String description = null;
+        List<Map<String, Object>> conditions = null;
+        Map<String, Object> output = null;
+        
+        if (request instanceof CreateRuleRequest) {
+            CreateRuleRequest createRequest = (CreateRuleRequest) request;
+            description = createRequest.getDescription();
+            conditions = createRequest.getConditions();
+            output = createRequest.getOutput();
+        } else if (request instanceof UpdateRuleRequest) {
+            UpdateRuleRequest updateRequest = (UpdateRuleRequest) request;
+            description = updateRequest.getDescription();
+            conditions = updateRequest.getConditions();
+            output = updateRequest.getOutput();
+        }
+        
+        // Include description from request or reconstruct from RuleOutput entities
+        if (description != null) {
+            responseBuilder.description(description);
+        } else {
+            // Try to get description from RuleOutput entities first
+            List<RuleOutput> outputs = outputRepository.findByDecisionRuleIdOrderByOrderIndexAsc(rule.getId());
+            if (!outputs.isEmpty()) {
+                RuleOutput firstOutput = outputs.get(0);
+                // Use description if available, otherwise use result
+                String outputDescription = firstOutput.getDescription() != null 
+                    ? firstOutput.getDescription() 
+                    : (firstOutput.getResult() != null ? firstOutput.getResult() : "");
+                responseBuilder.description(outputDescription);
+            } else {
+                // No outputs exist - use empty string (deprecated ruleResult field should not be used)
+                responseBuilder.description("");
+            }
+        }
+        
+        // Include conditions from request (or reconstruct from saved conditions)
+        if (conditions != null) {
+            responseBuilder.conditions(conditions);
+        } else {
+            // Reconstruct conditions from saved RuleCondition entities
+            List<Map<String, Object>> reconstructedConditions = reconstructConditionsFromRule(rule);
+            responseBuilder.conditions(reconstructedConditions);
+        }
+        
+        // Include output from request (or reconstruct from saved outputs)
+        if (output != null) {
+            responseBuilder.output(output);
+        } else {
+            // Reconstruct output from saved RuleOutput entities
+            Map<String, Object> reconstructedOutput = reconstructOutputFromRule(rule);
+            responseBuilder.output(reconstructedOutput);
+        }
+        
+        return responseBuilder.build();
+    }
+    
+    /**
+     * Reconstruct conditions array from saved RuleCondition entities
+     */
+    private List<Map<String, Object>> reconstructConditionsFromRule(DecisionRule rule) {
+        List<Map<String, Object>> conditions = new java.util.ArrayList<>();
+        
+        try {
+            // Use decisionRuleId instead of DecisionRule object to avoid object reference issues
+            List<RuleConditionGroup> groups = conditionGroupRepository.findByDecisionRuleIdOrderByOrderIndexAsc(rule.getId());
+            log.debug("Found {} condition groups for rule {}", groups.size(), rule.getId());
+            
+            for (RuleConditionGroup group : groups) {
+                List<RuleCondition> groupConditions = conditionRepository.findByGroupOrderByOrderIndexAsc(group);
+                log.debug("Found {} conditions in group {} for rule {}", groupConditions.size(), group.getId(), rule.getId());
+                
+                for (RuleCondition cond : groupConditions) {
+                    // Build ConditionResponse DTO
+                    ConditionResponse conditionResponse = ConditionResponse.builder()
+                        .field(cond.getFieldPath())
+                        .operator(mapOperatorToString(cond.getOperator()))
+                        .value(extractValueFromCondition(cond))
+                        .logicalOp(group.getType() == RuleGroupType.OR ? "OR" : "AND")
+                        .build();
+                    
+                    // Convert DTO to Map for response (response expects List<Map<String, Object>>)
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> conditionMap = mapper.convertValue(conditionResponse, Map.class);
+                    conditions.add(conditionMap);
+                }
+            }
+        } catch (Exception ex) {
+            log.error("Error reconstructing conditions for rule {}: {}", rule.getId(), ex.getMessage(), ex);
+        }
+        
+        return conditions;
+    }
+    
+    /**
+     * Reconstruct output object from saved RuleOutput entities
+     */
+    private Map<String, Object> reconstructOutputFromRule(DecisionRule rule) {
+        List<RuleOutput> outputs = outputRepository.findByDecisionRuleIdOrderByOrderIndexAsc(rule.getId());
+        
+        RuleOutputRequest outputRequest;
+        if (!outputs.isEmpty()) {
+            RuleOutput ruleOutput = outputs.get(0);
+            // Build DTO from RuleOutput entity
+            outputRequest = RuleOutputRequest.builder()
+                .action(ruleOutput.getAction())
+                .score(ruleOutput.getScore())
+                .result(ruleOutput.getResult())
+                .flag(ruleOutput.getFlag())
+                .documentType(ruleOutput.getDocumentType())
+                .documentId(ruleOutput.getDocumentId())
+                .description(ruleOutput.getDescription())
+                .build();
+        } else {
+            // No outputs exist - return empty DTO (deprecated fields should not be used)
+            outputRequest = RuleOutputRequest.builder()
+                .action(null)
+                .score(null)
+                .result(null)
+                .flag(null)
+                .documentType(null)
+                .documentId(null)
+                .description(null)
+                .build();
+        }
+        
+        // Convert DTO to Map for response (response expects Map<String, Object>)
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> output = mapper.convertValue(outputRequest, Map.class);
+        
+        return output;
+    }
+    
+    /**
+     * Map RuleOperatorType enum to string operator
+     */
+    private String mapOperatorToString(RuleOperatorType operator) {
+        return switch (operator) {
+            case EQUALS -> "==";
+            case NOT_EQUALS -> "!=";
+            case GT -> ">";
+            case GTE -> ">=";
+            case LT -> "<";
+            case LTE -> "<=";
+            case STR_CONTAINS -> "contains";
+            case STR_STARTS_WITH -> "startsWith";
+            case STR_ENDS_WITH -> "endsWith";
+            default -> "==";
+        };
+    }
+    
+    /**
+     * Extract value from RuleCondition based on value type
+     */
+    private Object extractValueFromCondition(RuleCondition condition) {
+        return switch (condition.getValueType()) {
+            case STRING -> condition.getValueText();
+            case INT -> condition.getValueNumber();
+            case BIG_DECIMAL -> condition.getValueDecimal();
+            case BOOLEAN -> condition.getValueBoolean();
+            default -> condition.getValueText();
+        };
+    }
+}

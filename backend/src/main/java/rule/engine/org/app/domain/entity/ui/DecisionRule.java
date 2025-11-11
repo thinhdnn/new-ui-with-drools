@@ -1,0 +1,123 @@
+package rule.engine.org.app.domain.entity.ui;
+
+import jakarta.persistence.*;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import rule.engine.org.app.domain.entity.common.BaseAuditableEntity;
+
+/**
+ * DecisionRule - Lean design with NO business field duplication.
+ * 
+ * This entity stores ONLY:
+ * - Rule metadata (name, priority, active status)
+ * - Rule expressions (when_expr, then_expr as Drools code strings)
+ * 
+ * Business fields are ONLY in Declaration entity.
+ * Execution results are in RuleExecutionResult entity.
+ */
+@Entity
+@Table(name = "decision_rules")
+@Data
+@EqualsAndHashCode(callSuper = true)
+public class DecisionRule extends BaseAuditableEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "rule_name", nullable = false)
+    private String ruleName;
+
+    @Column(name = "label")
+    private String label;
+
+    /**
+     * Fact type this rule applies to (e.g., "Declaration", "CargoReport")
+     * Determines which KieContainer the rule belongs to
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "fact_type", nullable = false, length = 100)
+    private FactType factType = FactType.DECLARATION;
+
+    /**
+     * Complete DRL (Drools Rule Language) content for the rule
+     * Generated from conditions and output when rule is created/updated
+     * Example: "rule \"RuleName_1\"\nsalience 10\nwhen\n    $d : Declaration(invoiceAmount > 100000)\nthen\n    RuleOutputHit output = new RuleOutputHit();\n    output.setAction(\"FLAG\");\n    totalResults.getHits().add(output);\nend"
+     */
+    @Column(name = "rule_content", columnDefinition = "text", nullable = false)
+    private String ruleContent;
+
+    @Column(name = "priority")
+    private Integer priority = 0;
+
+    @Column(name = "active")
+    private Boolean active = false; // New rules default to draft (inactive)
+
+    // ========== RULE OUTPUT METADATA ==========
+    // These define WHAT ACTION to take when rule matches
+    // They are COPIED to RuleExecutionResult when the rule fires
+    
+    // Outputs are persisted as RuleOutput entities (one-to-many relationship)
+    @OneToMany(mappedBy = "decisionRule", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @com.fasterxml.jackson.annotation.JsonIgnore // Don't serialize outputs in list view to avoid N+1 queries
+    private java.util.List<RuleOutput> outputs = new java.util.ArrayList<>();
+    
+    /**
+     * Action to take when this rule matches (DEPRECATED - use outputs instead)
+     * Examples: "FLAG", "APPROVE", "REJECT", "REVIEW", "HOLD"
+     * @deprecated Use RuleOutput entities instead
+     */
+    @Deprecated
+    @Column(name = "rule_action")
+    private String ruleAction;
+
+    /**
+     * Result message/description to store when this rule matches (DEPRECATED - use outputs instead)
+     * Example: "High value import from China detected"
+     * @deprecated Use RuleOutput entities instead
+     */
+    @Deprecated
+    @Column(name = "rule_result", columnDefinition = "text")
+    private String ruleResult;
+
+    /**
+     * Risk score to assign when this rule matches (0-100) (DEPRECATED - use outputs instead)
+     * Example: 75 for high risk, 25 for low risk
+     * @deprecated Use RuleOutput entities instead
+     */
+    @Deprecated
+    @Column(name = "rule_score")
+    private java.math.BigDecimal ruleScore;
+
+    // ========== VERSION TRACKING ==========
+    // Support for maintaining multiple versions of the same rule
+    
+    /**
+     * Version number of this rule (starts at 1, increments on each edit)
+     */
+    @Column(name = "version", nullable = false)
+    private Integer version = 1;
+    
+    /**
+     * Reference to the parent/original rule ID
+     * NULL for first version, points to the first version for all subsequent versions
+     */
+    @Column(name = "parent_rule_id")
+    private Long parentRuleId;
+    
+    /**
+     * Flag indicating if this is the latest version of the rule
+     * Only one version per rule family should have is_latest = true
+     */
+    @Column(name = "is_latest", nullable = false)
+    private Boolean isLatest = true;
+    
+    /**
+     * Optional notes describing what changed in this version
+     */
+    @Column(name = "version_notes", columnDefinition = "text")
+    private String versionNotes;
+
+    // NO business fields - they live in Declaration only!
+}
+

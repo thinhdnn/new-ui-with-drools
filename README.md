@@ -1,2 +1,124 @@
-# new-ui-with-drools
-This is example for custom ui on drools 10
+# Custom UI for Drools 10 - WCO Data Set 4.2.0
+
+## 📖 Introduction
+
+**Custom UI for Drools 10** is a custom user interface developed for the Drools 10 engine, specifically designed to support **WCO Goods Declaration and Cargo Report v4.2.0**.
+
+## 🔥 Introducing Drools 10
+
+**Drools 10** is the latest version of Red Hat Decision Manager, one of the most powerful and popular business rules management systems (BRMS) available today. Drools 10 brings significant improvements:
+
+### ⚡ Key Features of Drools 10
+
+- **🚀 Enhanced Performance**: Optimized engine with 30% faster execution speed compared to previous versions
+- **☁️ Cloud Native**: Full support for cloud environments and containerization (Docker, Kubernetes)
+- **🔧 Executable Model**: Better compile-time validation and runtime performance
+- **📝 Enhanced DRL Syntax**: Improved Drools Rule Language (DRL) syntax that's easier to read and maintain
+- **🔗 Spring Boot Integration**: Seamless integration with Spring Boot ecosystem
+- **📊 Improved Debugging**: More powerful debugging and monitoring tools
+
+### 🎯 Why Choose Drools 10?
+
+1. **Declarative Programming**: Write business logic as easy-to-understand rules without hard-coding
+2. **Separation of Concerns**: Separate business logic from application code
+3. **Dynamic Rules**: Change rules without redeploying the application
+4. **Complex Event Processing**: Handle complex events and real-time decision making
+5. **Scalability**: Efficiently process millions of facts and rules
+
+### 🏢 Use Cases for Customs/WCO Systems
+
+Drools 10 is particularly suitable for Customs systems because:
+
+- **Risk Assessment**: Evaluate cargo risk based on multiple criteria
+- **Tariff Classification**: Classify goods by HS Code and automatically apply duties
+- **Compliance Checking**: Verify compliance with international trade regulations
+- **Document Validation**: Validate the authenticity of various document types
+- **Duty Calculation**: Calculate duties and fees accurately and flexibly
+
+### 🎯 Objectives
+
+This project provides an intuitive and user-friendly interface to:
+- Manage and edit business rules in Drools
+- Track version history of rules
+- Support change request approval workflows
+- Integrate with WCO Goods Declaration and Cargo Report standards
+
+### 🏗️ Architecture
+
+```
+├── Backend (Spring Boot + Drools 10)
+│   ├── Business Rules Engine
+│   ├── WCO Data Processing
+│   └── PostgreSQL Database
+├── Frontend (Next.js + TypeScript)
+│   ├── Rules Management UI
+│   ├── Version Control
+│   └── Change Request System
+└── Sample Data (WCO 4.2.0 JSON)
+    ├── Goods Declaration
+    └── Cargo Report
+```
+
+### 📋 Key Features
+
+- ✅ Business rules management with version control
+- ✅ Intuitive rules editing interface
+- ✅ Change history tracking
+- ✅ Change request approval system
+- ✅ Compatible with WCO standards v4.2.0
+
+## 📁 Sample Data
+
+WCO Data Set 4.2.0 compatible JSON samples are stored in the `json/` directory:
+
+- `goods-declaration-sample.json`: Import goods declaration (IM)
+  - Declaration information and related parties
+  - Goods details, duties, and fees
+  - Supporting documents
+  
+- `cargo-report-sample.json`: Cargo report and manifest (CRI)
+  - Vessel and container information
+  - Consignment list
+  - Goods details in each shipment
+
+## 🚀 Quick Start
+
+See [QUICK_START.md](./QUICK_START.md) for detailed installation and setup instructions.
+
+---
+
+## Prerequisites
+
+- Java 17+
+- Node.js 18+
+- PostgreSQL
+
+## 🔧 Setup
+
+### 1. Start Backend
+
+```bash
+cd backend
+
+# Start database
+docker compose up -d
+
+# Start Spring Boot (JPA will auto-update schema)
+./gradlew bootRun
+
+# Backend runs on http://localhost:8080
+```
+
+### 2. Start Frontend
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Start Next.js dev server
+npm run dev
+
+# Frontend runs on http://localhost:3000
+```

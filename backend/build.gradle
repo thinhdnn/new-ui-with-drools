@@ -1,0 +1,65 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '3.5.6'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'rule.engine.org'
+version = '0.0.1-SNAPSHOT'
+description = 'Rule project for Spring Boot'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'org.springframework.boot:spring-boot-starter-aop'
+
+	// Flyway for database migrations
+	implementation 'org.flywaydb:flyway-core'
+	implementation 'org.flywaydb:flyway-database-postgresql'
+
+	// Drools 10.0.0
+	implementation 'org.kie:kie-api:10.0.0'
+	implementation 'org.drools:drools-core:10.0.0'
+	implementation 'org.drools:drools-compiler:10.0.0'
+	implementation 'org.kie:kie-ci:10.0.0'
+	implementation 'org.drools:drools-xml-support:10.0.0'
+
+	// MapStruct for DTO <-> entity mappings
+	implementation 'org.mapstruct:mapstruct:1.6.2'
+
+	runtimeOnly 'org.postgresql:postgresql:42.7.4'
+
+	compileOnly 'org.projectlombok:lombok:1.18.34'
+	annotationProcessor 'org.projectlombok:lombok:1.18.34'
+	annotationProcessor 'org.mapstruct:mapstruct-processor:1.6.2'
+	annotationProcessor 'org.projectlombok:lombok-mapstruct-binding:0.2.0'
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Generate pom.properties for Drools
+jar {
+	manifest {
+		attributes(
+			'Implementation-Title': project.name,
+			'Implementation-Version': project.version,
+			'Implementation-Vendor': project.group
+		)
+	}
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}

@@ -1,0 +1,83 @@
+{
+  "FunctionCode": "1",
+  "TypeCode": "IM",
+  "OfficeID": "VNHPH",
+  "ID": "23IM123456",
+  "SubmissionDateTime": "2025-10-30T00:00:00Z",
+  "UCR": "UCR-2025-0001",
+
+  "DeclarantID": "DEC123456",
+  "DeclarantName": "ABC Broker Ltd",
+  "DeclarantCountryID": "VN",
+
+  "ConsignorID": "CN-EXPORT-8888",
+  "ConsignorName": "Shanghai Garment Export Co Ltd",
+  "ConsignorCountryID": "CN",
+
+  "ConsigneeID": "VN-IMPORT-7777",
+  "ConsigneeName": "KAPE VN Warehouse",
+  "ConsigneeCountryID": "VN",
+
+  "ImporterID": "VN0123456789",
+  "ImporterName": "KAPE Co.",
+  "ImporterCountryID": "VN",
+
+  "CountryOfExportID": "CN",
+  "CountryOfImportID": "VN",
+  "CountryOfDestinationID": "VN",
+
+  "IncotermCode": "CIF",
+
+  "InvoiceID": "INV-8899",
+  "InvoiceIssueDateTime": "2025-10-20T00:00:00Z",
+  "InvoiceCurrencyCode": "USD",
+  "InvoiceAmount": 125000.0,
+
+  "TransportMeansModeCode": "1",
+  "TransportMeansID": "IMO9876543",
+  "TransportMeansJourneyID": "VJ123",
+
+  "LoadingLocationID": "CNSHA",
+  "UnloadingLocationID": "VNHPH",
+
+  "LocationOfGoodsID": "VNHPH-PORT-01",
+  "WarehouseID": "CFS-08",
+
+  "PackageQuantity": 120,
+  "MarksNumbersID": "KAPE-BOX-1-120",
+
+  "GrossMassMeasure": 15000.12,
+  "NetMassMeasure": 13500.98,
+  "FreightAmount": 3000.0,
+  "InsuranceAmount": 250.0,
+  "OtherChargesAmount": 120.0,
+
+  "PreviousDocumentIDs": ["BL:OOLU1234567890"],
+
+  "GovernmentAgencyGoodsItem": [
+    {
+      "SequenceNumeric": 1,
+      "HSID": "610910",
+      "Description": "T-shirts, cotton",
+      "OriginCountryID": "VN",
+      "NetWeightMeasure": 500.0,
+      "GrossWeightMeasure": 520.0,
+      "QuantityQuantity": 10000,
+      "QuantityUnitCode": "NMB",
+      "InvoiceLineNumberID": "1",
+      "UnitPriceAmount": 3.5,
+      "StatisticalValueAmount": 35000.0,
+      "CustomsValueAmount": 35000.0,
+      "ProcedureCode": "4000",
+      "PreviousProcedureCode": "0000",
+      "PreferenceCode": "000",
+      "ValuationMethodCode": "1",
+      "DutyRate": 12.0,
+      "DutyAmount": 4200.0,
+      "TaxTypeCode": "VAT",
+      "TaxRateNumeric": 10.0,
+      "TaxAmount": 3920.0,
+      "AdditionalDocumentIDs": ["CO:VN-FTA-12345"]
+    }
+  ]
+}

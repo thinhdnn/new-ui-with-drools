@@ -1,0 +1,543 @@
+"use client"
+import { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { ArrowLeft, Save, Loader2, Plus, Trash2, FileText, Package, FilePlus } from 'lucide-react'
+import { SearchableSelect } from '@/components/SearchableSelect'
+import { api, fetchApi } from '@/lib/api'
+import { transformRule } from '@/app/api/rules/transform'
+
+type LogicalOperator = 'AND' | 'OR'
+
+type Condition = {
+  id: string
+  field: string
+  operator: string // Operators come from backend metadata (operatorsByType)
+  value: string
+  logicalOp?: LogicalOperator
+}
+
+type RuleFormData = {
+  ruleName: string
+  label: string
+  factType: string
+  priority: number
+  active: boolean
+  output: Record<string, string> // Dynamic output fields from metadata
+  conditions: Condition[]
+}
+
+type FieldDefinition = {
+  name: string
+  label: string
+  type: string
+  description: string
+  orderIndex?: number // Optional order for UI display
+}
+
+type OperatorDefinition = {
+  operator: string
+  label: string
+  description?: string
+}
+
+type FieldMetadata = {
+  inputFields: FieldDefinition[]
+  outputFields: FieldDefinition[]
+  operatorsByType: Record<string, OperatorDefinition[]>
+}
+
+export default function NewRulePage() {
+  const router = useRouter()
+  const [loading, setLoading] = useState(false)
+  const [loadingMetadata, setLoadingMetadata] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [metadata, setMetadata] = useState<FieldMetadata | null>(null)
+  const [factTypes, setFactTypes] = useState<string[]>([])
+  
+  const [formData, setFormData] = useState<RuleFormData>({
+    ruleName: '',
+    label: '',
+    factType: 'Declaration',
+    priority: 0,
+    active: true,
+    output: {}, // Will be initialized from metadata
+    conditions: [{ id: crypto.randomUUID(), field: '', operator: '', value: '', logicalOp: 'AND' }],
+  })
+
+  // Initialize output fields from metadata
+  useEffect(() => {
+    if (metadata?.outputFields) {
+      const initialOutput: Record<string, string> = {}
+      metadata.outputFields.forEach(field => {
+        initialOutput[field.name] = ''
+      })
+      setFormData(prev => ({
+        ...prev,
+        output: { ...prev.output, ...initialOutput }
+      }))
+    }
+  }, [metadata])
+
+  // Fetch metadata function
+  const fetchMetadata = async (factType?: string) => {
+    try {
+      setLoadingMetadata(true)
+      const type = factType || formData.factType || 'Declaration'
+      const data = await fetchApi<FieldMetadata>(api.rules.metadata(type))
+      setMetadata(data)
+    } catch (err) {
+      console.error('Failed to load metadata:', err)
+    } finally {
+      setLoadingMetadata(false)
+    }
+  }
+
+  // Fetch field metadata and fact types from backend
+  useEffect(() => {
+    const fetchFactTypes = async () => {
+      try {
+        const types = await fetchApi<string[]>(api.rules.factTypes())
+        setFactTypes(types.length > 0 ? types : ['Declaration'])
+      } catch (err) {
+        console.error('Failed to load fact types:', err)
+        setFactTypes(['Declaration'])
+      }
+    }
+    
+    fetchFactTypes().then(() => {
+      // Load metadata after fact types are loaded, using default factType
+      fetchMetadata(formData.factType)
+    })
+  }, [])
+
+  // Reload metadata when factType changes
+  useEffect(() => {
+    if (formData.factType) {
+      fetchMetadata(formData.factType)
+    }
+  }, [formData.factType])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setError(null)
+
+    // Validate that at least one condition is filled
+    const validConditions = formData.conditions.filter(c => c.field && c.operator && c.value)
+    if (validConditions.length === 0) {
+      setError('Please add at least one valid condition')
+      setLoading(false)
+      return
+    }
+
+    try {
+      // Convert conditions to structured format matching DB schema
+      const conditions = formData.conditions
+        .filter(c => c.field && c.operator && c.value)
+        .map(c => ({
+          field: c.field,
+          operator: c.operator,
+          value: c.value,
+          logicalOp: c.logicalOp || 'AND'
+        }))
+
+      const payload = {
+        ruleName: formData.ruleName,
+        label: formData.ruleName, // Auto-generate label from ruleName
+        factType: formData.factType, // Include factType
+        priority: 10, // Default priority
+        active: false, // New rules default to draft (inactive)
+        conditions, // Send structured conditions array (not ruleCondition string)
+        description: formData.ruleName, // Use ruleName as description
+        output: Object.fromEntries(
+          Object.entries(formData.output).map(([key, value]) => {
+            // Convert numeric fields
+            if (metadata?.outputFields) {
+              const field = metadata.outputFields.find(f => f.name === key)
+              if (field && (field.type === 'decimal' || field.type === 'number' || field.type === 'integer')) {
+                return [key, value ? parseFloat(value) : null]
+              }
+            }
+            return [key, value || null]
+          })
+        ),
+      }
+
+      const data = await fetchApi(api.rules.create(), {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+
+      router.push('/rules')
+    } catch (err: any) {
+      // Extract error message from response if available
+      let errorMessage = 'An error occurred'
+      if (err.message) {
+        errorMessage = err.message
+      } else if (err.error) {
+        errorMessage = err.error
+      } else if (typeof err === 'string') {
+        errorMessage = err
+      }
+      setError(errorMessage)
+      setLoading(false)
+    }
+  }
+
+  const addCondition = () => {
+    setFormData(prev => ({
+      ...prev,
+      conditions: [...prev.conditions, { id: crypto.randomUUID(), field: '', operator: '', value: '', logicalOp: 'AND' }]
+    }))
+  }
+
+  const removeCondition = (id: string) => {
+    setFormData(prev => ({
+      ...prev,
+      conditions: prev.conditions.filter(c => c.id !== id)
+    }))
+  }
+
+  const updateCondition = (id: string, updates: Partial<Condition>) => {
+    setFormData(prev => ({
+      ...prev,
+      conditions: prev.conditions.map(c => c.id === id ? { ...c, ...updates } : c)
+    }))
+  }
+
+
+  if (loadingMetadata) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <Loader2 className="animate-spin" size={32} />
+      </div>
+    )
+  }
+
+  if (!metadata) {
+    return (
+      <div className="text-center text-red-600 py-10">
+        Failed to load field metadata. Please refresh the page.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-2 text-slate-600 hover:text-slate-900 focus-ring rounded-md px-2 py-1"
+        >
+          <FilePlus className="w-4 h-4" />
+          <ArrowLeft className="w-4 h-4" />
+          Back to Rules
+        </button>
+        {/* Fact Type Toggle */}
+        {factTypes.length > 0 && (
+          <div className="flex items-center gap-2 bg-white border border-outlineVariant rounded-md p-2">
+            <Package size={16} className="text-slate-500" />
+            <div className="flex gap-1">
+              {factTypes.map((factType) => (
+                <button
+                  key={factType}
+                  type="button"
+                  onClick={() => setFormData(prev => ({ ...prev, factType }))}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 ${
+                    formData.factType === factType
+                      ? 'bg-indigo-600 text-white shadow-md'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {factType === 'Declaration' ? <FileText size={14} /> : <Package size={14} />}
+                  {factType}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-md p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Basic Information */}
+        <div className="bg-white rounded-md border border-outlineVariant p-6 space-y-4">
+          <div>
+            <label htmlFor="ruleName" className="block text-sm font-medium text-slate-700 mb-1">
+              Rule Name <span className="text-red-600">*</span>
+            </label>
+            <input
+              id="ruleName"
+              type="text"
+              required
+              value={formData.ruleName}
+              onChange={(e) => setFormData(prev => ({ ...prev, ruleName: e.target.value }))}
+              className="w-full px-3 py-1.5 text-sm border border-outlineVariant rounded-md focus-ring"
+              placeholder="e.g., high_value_import_flag"
+            />
+            <p className="text-xs text-slate-500 mt-1">Internal identifier for the rule (use lowercase with underscores)</p>
+          </div>
+        </div>
+
+        {/* Conditions (When) */}
+        <section className="bg-surface rounded-md border border-outlineVariant p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">Conditions (When)</h2>
+            <button
+              type="button"
+              onClick={addCondition}
+              className="inline-flex items-center gap-1 text-sm text-primary hover:underline focus-ring"
+            >
+              <Plus size={16} /> Add Condition
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            {formData.conditions.map((condition, idx) => {
+              const selectedField = metadata.inputFields.find(f => f.name === condition.field)
+              const operators = selectedField 
+                ? (metadata.operatorsByType[selectedField.type] || [])
+                : (metadata.operatorsByType['string'] || [])
+
+              return (
+                <div key={condition.id} className="flex items-start gap-2 bg-slate-50 p-3 rounded-md">
+                  <div className="flex-1 grid grid-cols-12 gap-2">
+                    {idx > 0 && (
+                      <select
+                        value={formData.conditions[idx - 1]?.logicalOp || 'AND'}
+                        onChange={(e) => updateCondition(formData.conditions[idx - 1].id, { logicalOp: e.target.value as LogicalOperator })}
+                        className="col-span-2 h-9 px-2 text-sm rounded-md border border-outlineVariant focus-ring"
+                      >
+                        <option value="AND">AND</option>
+                        <option value="OR">OR</option>
+                      </select>
+                    )}
+                    
+                    <SearchableSelect
+                      value={condition.field}
+                      onChange={(value) => {
+                        // Set default operator based on field type from metadata
+                        const selectedField = metadata.inputFields.find(f => f.name === value)
+                        const defaultOperators = selectedField 
+                          ? (metadata.operatorsByType[selectedField.type] || [])
+                          : (metadata.operatorsByType['string'] || [])
+                        const defaultOperator = defaultOperators.length > 0 ? defaultOperators[0].operator : ''
+                        updateCondition(condition.id, { field: value, operator: defaultOperator })
+                      }}
+                      options={metadata.inputFields}
+                      placeholder="Select field..."
+                      className={`${idx > 0 ? 'col-span-4' : 'col-span-6'}`}
+                    />
+
+                    <select
+                      value={condition.operator && operators.some(op => op.operator === condition.operator) 
+                        ? condition.operator 
+                        : (operators.length > 0 ? operators[0].operator : '')}
+                      onChange={(e) => updateCondition(condition.id, { operator: e.target.value })}
+                      className="col-span-3 h-9 px-2 text-sm rounded-md border border-outlineVariant focus-ring"
+                      disabled={!condition.field || operators.length === 0}
+                      title={operators.find(op => op.operator === condition.operator)?.description}
+                    >
+                      {operators.map(op => (
+                        <option key={op.operator} value={op.operator} title={op.description}>
+                          {op.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <input
+                      type={selectedField?.type === 'integer' || selectedField?.type === 'decimal' ? 'number' : 'text'}
+                      step={selectedField?.type === 'decimal' ? '0.01' : undefined}
+                      value={condition.value}
+                      onChange={(e) => updateCondition(condition.id, { value: e.target.value })}
+                      placeholder="Value"
+                      className="col-span-3 h-9 px-2 text-sm rounded-md border border-outlineVariant focus-ring"
+                      disabled={!condition.field}
+                      required
+                    />
+                  </div>
+
+                  {formData.conditions.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeCondition(condition.id)}
+                      className="p-2 text-red-600 hover:bg-red-50 rounded-md focus-ring"
+                      aria-label="Remove condition"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </section>
+
+        {/* Outputs (Then) */}
+        <section className="bg-surface rounded-md border border-outlineVariant p-6">
+          <h2 className="text-lg font-semibold mb-4">Outputs (Then)</h2>
+          <p className="text-sm text-slate-600 mb-4">
+            Define what happens when this rule matches
+          </p>
+
+          {metadata?.outputFields && metadata.outputFields.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {[...metadata.outputFields]
+                .sort((a, b) => {
+                  // Sort by orderIndex if available, otherwise maintain insertion order
+                  const orderA = a.orderIndex ?? 999;
+                  const orderB = b.orderIndex ?? 999;
+                  return orderA - orderB;
+                })
+                .map((field) => {
+                const fieldValue = formData.output[field.name] || ''
+                const isRequired = field.name === 'action'
+                const isTextarea = field.type === 'text' || field.name === 'result' || field.name === 'description'
+                const isNumber = field.type === 'decimal' || field.type === 'number' || field.type === 'integer'
+                
+                // Special handling for action field (dropdown)
+                if (field.name === 'action') {
+                  return (
+                    <div key={field.name}>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">
+                        {field.label} {isRequired && <span className="text-red-600">*</span>}
+                      </label>
+                      <select
+                        value={fieldValue}
+                        onChange={(e) => setFormData(prev => ({
+                          ...prev,
+                          output: { ...prev.output, [field.name]: e.target.value }
+                        }))}
+                        className="w-full px-3 py-1.5 text-sm border border-outlineVariant rounded-md focus-ring"
+                        required={isRequired}
+                      >
+                        <option value="">-- Select {field.label} --</option>
+                        <option value="FLAG">FLAG</option>
+                        <option value="APPROVE">APPROVE</option>
+                        <option value="REJECT">REJECT</option>
+                        <option value="REVIEW">REVIEW</option>
+                        <option value="HOLD">HOLD</option>
+                      </select>
+                      {field.description && (
+                        <p className="text-xs text-slate-500 mt-1">{field.description}</p>
+                      )}
+                    </div>
+                  )
+                }
+
+                // Textarea for text fields or specific fields
+                if (isTextarea) {
+                  return (
+                    <div key={field.name} className={field.name === 'result' || field.name === 'description' ? 'md:col-span-2' : ''}>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">
+                        {field.label} {isRequired && <span className="text-red-600">*</span>}
+                      </label>
+                      <textarea
+                        value={fieldValue}
+                        onChange={(e) => setFormData(prev => ({
+                          ...prev,
+                          output: { ...prev.output, [field.name]: e.target.value }
+                        }))}
+                        className="w-full px-3 py-1.5 text-sm border border-outlineVariant rounded-md focus-ring"
+                        rows={field.name === 'description' ? 3 : 2}
+                        placeholder={field.description || `Enter ${field.label.toLowerCase()}`}
+                      />
+                      {field.description && (
+                        <p className="text-xs text-slate-500 mt-1">{field.description}</p>
+                      )}
+                    </div>
+                  )
+                }
+
+                // Number input for decimal/number/integer
+                if (isNumber) {
+                  return (
+                    <div key={field.name}>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">
+                        {field.label} {isRequired && <span className="text-red-600">*</span>}
+                      </label>
+                      <input
+                        type="number"
+                        min={field.name === 'score' ? 0 : undefined}
+                        max={field.name === 'score' ? 100 : undefined}
+                        step={field.type === 'decimal' ? '0.01' : '1'}
+                        value={fieldValue}
+                        onChange={(e) => setFormData(prev => ({
+                          ...prev,
+                          output: { ...prev.output, [field.name]: e.target.value }
+                        }))}
+                        className="w-full px-3 py-1.5 text-sm border border-outlineVariant rounded-md focus-ring"
+                        placeholder={field.description || `Enter ${field.label.toLowerCase()}`}
+                      />
+                      {field.description && (
+                        <p className="text-xs text-slate-500 mt-1">{field.description}</p>
+                      )}
+                    </div>
+                  )
+                }
+
+                // Default text input
+                return (
+                  <div key={field.name}>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      {field.label} {isRequired && <span className="text-red-600">*</span>}
+                    </label>
+                    <input
+                      type="text"
+                      value={fieldValue}
+                      onChange={(e) => setFormData(prev => ({
+                        ...prev,
+                        output: { ...prev.output, [field.name]: e.target.value }
+                      }))}
+                      className="w-full px-3 py-1.5 text-sm border border-outlineVariant rounded-md focus-ring"
+                      placeholder={field.description || `Enter ${field.label.toLowerCase()}`}
+                    />
+                    {field.description && (
+                      <p className="text-xs text-slate-500 mt-1">{field.description}</p>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-500">Loading output fields...</p>
+          )}
+        </section>
+
+        {/* Submit */}
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            disabled={loading}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-primary text-white rounded-md hover:bg-primary/90 focus-ring disabled:opacity-50"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Creating...
+              </>
+            ) : (
+              <>
+                <Save className="w-4 h-4" />
+                Create Rule
+              </>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => router.back()}
+            className="px-4 py-2 text-sm border border-outlineVariant rounded-md hover:bg-slate-50 focus-ring"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
