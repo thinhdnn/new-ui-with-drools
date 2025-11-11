@@ -49,8 +49,16 @@ dependencies {
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-// Generate pom.properties for Drools
+// Ensure Spring Boot creates executable JAR
 jar {
+	enabled = false
+	archiveClassifier = ''
+}
+
+// Configure the Spring Boot JAR
+bootJar {
+	enabled = true
+	archiveClassifier = ''
 	manifest {
 		attributes(
 			'Implementation-Title': project.name,

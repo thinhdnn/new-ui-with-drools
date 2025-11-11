@@ -83,19 +83,23 @@ jobs:
       working-directory: ./backend
       run: |
         chmod +x ./gradlew
-        ./gradlew build -x test
+        ./gradlew clean bootJar -x test
         
         # List generated JAR files for debugging
         echo "📁 Generated JAR files:"
         ls -la build/libs/
         
-        # Check if JAR is executable
-        JAR_FILE=$(ls build/libs/*.jar | head -1)
-        if [ -f "$JAR_FILE" ]; then
-          echo "✅ JAR file found: $JAR_FILE"
-          echo "📊 JAR file size: $(du -h "$JAR_FILE")"
+        # Find the executable JAR (should be the only one now)
+        EXECUTABLE_JAR=$(ls build/libs/*.jar 2>/dev/null | grep -v plain | head -1)
+        if [ -f "$EXECUTABLE_JAR" ]; then
+          echo "✅ Executable JAR found: $EXECUTABLE_JAR"
+          echo "📊 JAR file size: $(du -h "$EXECUTABLE_JAR")"
+          # Check if it has Main-Class in manifest
+          unzip -q -c "$EXECUTABLE_JAR" META-INF/MANIFEST.MF | grep -q "Main-Class" && echo "✅ Main-Class found in manifest" || echo "❌ No Main-Class in manifest"
         else
-          echo "❌ No JAR file found in build/libs/"
+          echo "❌ No executable JAR file found in build/libs/"
+          echo "Available files:"
+          ls -la build/libs/ || echo "No files in build/libs/"
           exit 1
         fi
 
@@ -109,7 +113,16 @@ jobs:
         SPRING_JPA_HIBERNATE_DDL_AUTO: update
         SERVER_PORT: 8080
       run: |
-        nohup java -jar build/libs/*.jar > backend.log 2>&1 &
+        # Find the executable JAR (should be the only one now)
+        EXECUTABLE_JAR=$(ls build/libs/*.jar 2>/dev/null | head -1)
+        if [ ! -f "$EXECUTABLE_JAR" ]; then
+          echo "❌ No executable JAR found"
+          ls -la build/libs/
+          exit 1
+        fi
+        
+        echo "🚀 Starting backend with: $EXECUTABLE_JAR"
+        nohup java -jar "$EXECUTABLE_JAR" > backend.log 2>&1 &
         BACKEND_PID=$!
         echo $BACKEND_PID > backend.pid
         echo "Backend PID: $BACKEND_PID"
@@ -387,12 +400,12 @@ jobs:
         echo "## 📊 Demo Summary"
         echo "**Duration:** ${{ github.event.inputs.demo_duration }} minutes"
         echo "**Frontend URL:** ${{ env.FRONTEND_URL }}"
-        echo "**Backend:** Running internally"
+        echo "**Backend:** Running internally (localhost:8080)"
         echo "**Status:** Demo completed"
         echo ""
-        echo "🎯 **Why both Frontend AND Backend are exposed:**"
-        echo "   - Frontend: User interface for rules management"
-        echo "   - Backend: REST API for data processing and WCO validation"
-        echo "   - Both needed for complete demo functionality"
+        echo "🎯 **Demo Architecture:**"
+        echo "   - Frontend: Public UI via ngrok tunnel"
+        echo "   - Backend: Internal API (proxied through Frontend)"
+        echo "   - Single public URL for complete functionality"
         echo ""
         echo "Thank you for trying Drools UI Demo! 🎉"
