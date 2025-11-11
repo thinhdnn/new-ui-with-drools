@@ -138,30 +138,41 @@ if [ $timeout -eq 0 ]; then
     cleanup
 fi
 
-# Start ngrok for backend
-print_info "Starting ngrok for backend..."
-nohup ngrok http 8080 --log=stdout > ngrok-backend.log 2>&1 &
-sleep 5
-
-# Get backend URL
-BACKEND_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
-if [ "$BACKEND_URL" = "null" ] || [ -z "$BACKEND_URL" ]; then
-    print_error "Failed to get backend ngrok URL"
-    cleanup
-fi
-
-print_info "✅ Backend exposed at: $BACKEND_URL"
-
-# Build and start frontend
+# Build frontend first
 print_info "Installing frontend dependencies..."
 cd frontend
 npm ci
 
 print_info "Building frontend..."
-export NEXT_PUBLIC_API_URL=$BACKEND_URL
+export NEXT_PUBLIC_API_URL=http://localhost:8080
 npm run build
+cd ..
 
+# Start ngrok for backend
+print_info "Starting ngrok for backend..."
+nohup ngrok http 8080 --log=stdout > ngrok-backend.log 2>&1 &
+sleep 10
+
+# Get backend URL with retry
+for i in {1..5}; do
+    BACKEND_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url' 2>/dev/null)
+    if [ "$BACKEND_URL" != "null" ] && [ -n "$BACKEND_URL" ]; then
+        print_info "✅ Backend exposed at: $BACKEND_URL"
+        break
+    fi
+    print_info "Waiting for ngrok backend tunnel... (attempt $i/5)"
+    sleep 3
+done
+
+if [ "$BACKEND_URL" = "null" ] || [ -z "$BACKEND_URL" ]; then
+    print_error "Failed to get backend ngrok URL"
+    cleanup
+fi
+
+# Start frontend with backend URL
 print_info "Starting frontend..."
+cd frontend
+export NEXT_PUBLIC_API_URL=$BACKEND_URL
 nohup npm start > ../frontend.log 2>&1 &
 FRONTEND_PID=$!
 cd ..

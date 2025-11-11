@@ -121,9 +121,15 @@ gh workflow run demo-deploy.yml --field demo_duration="10"
 **What happens:**
 1. 🏗️ Builds backend (Spring Boot) and frontend (Next.js)
 2. 🗄️ Starts PostgreSQL database
-3. 🌍 Exposes both services via ngrok public URLs
+3. 🌍 Exposes both services via ngrok public URLs:
+   - **Frontend URL**: Interactive rules management UI
+   - **Backend URL**: REST API for WCO compliance & data processing
 4. 📝 Creates GitHub issue with demo links
 5. ⏰ Automatically stops after specified time
+
+**Why both URLs?**
+- Frontend: User interface for rules creation and management
+- Backend: API endpoints for validation, processing, and database operations
 
 ### Local Testing with Ngrok
 
