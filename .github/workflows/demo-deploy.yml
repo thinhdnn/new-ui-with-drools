@@ -70,12 +70,13 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gradle-
 
-    # Install ngrok
-    - name: Install ngrok
+    # Install ngrok and nginx
+    - name: Install ngrok and nginx
       run: |
+        # Install ngrok
         curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
         echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-        sudo apt update && sudo apt install ngrok
+        sudo apt update && sudo apt install ngrok nginx -y
         ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
 
     # Build and start backend
@@ -189,33 +190,40 @@ jobs:
           timeout=$((timeout-2))
         done
 
-    # Setup ngrok tunnels for both backend and frontend
-    - name: Start Ngrok Tunnels
+    # Setup Nginx reverse proxy
+    - name: Setup Nginx Reverse Proxy
       run: |
-        # Start backend tunnel
-        nohup ngrok http 8080 --log=stdout > ngrok-backend.log 2>&1 &
-        BACKEND_NGROK_PID=$!
-        echo "Started backend ngrok tunnel for port 8080 (PID: $BACKEND_NGROK_PID)"
+        # Copy nginx config
+        sudo cp nginx.conf /etc/nginx/nginx.conf
         
-        # Start frontend tunnel  
-        nohup ngrok http 3000 --log=stdout > ngrok-frontend.log 2>&1 &
-        FRONTEND_NGROK_PID=$!
-        echo "Started frontend ngrok tunnel for port 3000 (PID: $FRONTEND_NGROK_PID)"
+        # Test nginx config
+        sudo nginx -t
         
-        # Wait for tunnels to be ready
-        echo "⏳ Waiting for ngrok tunnels to be ready..."
+        # Start nginx
+        sudo systemctl start nginx
+        sudo systemctl status nginx --no-pager
+        
+        # Verify nginx is serving
+        echo "🔍 Testing nginx proxy..."
+        curl -f http://localhost/ >/dev/null && echo "✅ Frontend accessible via nginx" || echo "❌ Frontend not accessible"
+        curl -f http://localhost/actuator/health >/dev/null && echo "✅ Backend accessible via nginx" || echo "❌ Backend not accessible"
+
+    # Setup single ngrok tunnel for nginx proxy
+    - name: Start Ngrok Tunnel for Nginx
+      run: |
+        # Start single ngrok tunnel for nginx (port 80)
+        nohup ngrok http 80 --log=stdout > ngrok.log 2>&1 &
+        NGROK_PID=$!
+        echo "Started ngrok tunnel for nginx proxy on port 80 (PID: $NGROK_PID)"
+        
+        # Wait for tunnel to be ready
+        echo "⏳ Waiting for ngrok tunnel to be ready..."
         sleep 10
         
-        # Check if ngrok processes are still running
-        if ! kill -0 $BACKEND_NGROK_PID 2>/dev/null; then
-          echo "❌ Backend ngrok process died"
-          cat ngrok-backend.log
-          exit 1
-        fi
-        
-        if ! kill -0 $FRONTEND_NGROK_PID 2>/dev/null; then
-          echo "❌ Frontend ngrok process died"
-          cat ngrok-frontend.log
+        # Check if ngrok process is still running
+        if ! kill -0 $NGROK_PID 2>/dev/null; then
+          echo "❌ Ngrok process died"
+          cat ngrok.log
           exit 1
         fi
         
@@ -232,60 +240,44 @@ jobs:
         done
         
         # Debug: Show all tunnels
-        echo "🔍 Debug: All ngrok tunnels:"
+        echo "🔍 Debug: Ngrok tunnel:"
         TUNNELS_JSON=$(curl -s http://localhost:4040/api/tunnels)
         echo "$TUNNELS_JSON" | jq '.'
         
-        echo ""
-        echo "🔍 Debug: Tunnel details:"
-        echo "$TUNNELS_JSON" | jq '.tunnels[] | {name, proto, public_url, config: .config.addr}'
+        # Extract the public URL (prefer HTTPS)
+        DEMO_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[] | select(.proto=="https") | .public_url')
         
-        # Extract backend URL (port 8080)
-        BACKEND_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[] | select(.config.addr | contains("8080")) | select(.proto=="https") | .public_url')
-        
-        # Extract frontend URL (port 3000)  
-        FRONTEND_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[] | select(.config.addr | contains("3000")) | select(.proto=="https") | .public_url')
-        
-        # Fallback: try without HTTPS filter
-        if [ "$BACKEND_URL" = "null" ] || [ -z "$BACKEND_URL" ]; then
-          BACKEND_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[] | select(.config.addr | contains("8080")) | .public_url' | head -1)
+        # Fallback to HTTP if HTTPS not available
+        if [ "$DEMO_URL" = "null" ] || [ -z "$DEMO_URL" ]; then
+          DEMO_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[0].public_url')
         fi
         
-        if [ "$FRONTEND_URL" = "null" ] || [ -z "$FRONTEND_URL" ]; then
-          FRONTEND_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[] | select(.config.addr | contains("3000")) | .public_url' | head -1)
-        fi
+        echo "DEMO_URL=$DEMO_URL" >> $GITHUB_ENV
+        echo "✅ Demo URL: $DEMO_URL"
         
-        echo "BACKEND_URL=$BACKEND_URL" >> $GITHUB_ENV
-        echo "FRONTEND_URL=$FRONTEND_URL" >> $GITHUB_ENV
-        
-        echo "✅ Backend URL: $BACKEND_URL"
-        echo "✅ Frontend URL: $FRONTEND_URL"
-        
-        if [ "$BACKEND_URL" = "null" ] || [ -z "$BACKEND_URL" ]; then
-          echo "❌ Failed to get backend ngrok URL"
+        if [ "$DEMO_URL" = "null" ] || [ -z "$DEMO_URL" ]; then
+          echo "❌ Failed to get ngrok URL"
           echo "Available tunnels:"
           echo "$TUNNELS_JSON" | jq '.tunnels[] | {name, public_url, config}'
           exit 1
         fi
         
-        if [ "$FRONTEND_URL" = "null" ] || [ -z "$FRONTEND_URL" ]; then
-          echo "❌ Failed to get frontend ngrok URL"
-          echo "Available tunnels:"
-          echo "$TUNNELS_JSON" | jq '.tunnels[] | {name, public_url, config}'
-          exit 1
-        fi
+        # Test the demo URL
+        echo "🧪 Testing demo URL..."
+        curl -f "$DEMO_URL/" >/dev/null && echo "✅ Frontend accessible via $DEMO_URL" || echo "⚠️ Frontend test failed"
+        curl -f "$DEMO_URL/actuator/health" >/dev/null && echo "✅ Backend API accessible via $DEMO_URL/api" || echo "⚠️ Backend API test failed"
 
-    # Rebuild frontend with actual backend URL
-    - name: Rebuild Frontend with Backend URL
+    # Rebuild frontend with relative API URLs (nginx will proxy /api to backend)
+    - name: Rebuild Frontend for Nginx Proxy
       working-directory: ./frontend
       env:
-        NEXT_PUBLIC_API_URL: ${{ env.BACKEND_URL }}
+        NEXT_PUBLIC_API_URL: ""  # Use relative URLs - nginx will proxy /api to backend
       run: |
-        echo "🔄 Rebuilding frontend with backend URL: ${{ env.BACKEND_URL }}"
+        echo "🔄 Rebuilding frontend for nginx proxy (using relative /api URLs)"
         npm run build
 
-    # Restart frontend with new build
-    - name: Restart Frontend with Backend URL
+    # Restart frontend with relative URLs
+    - name: Restart Frontend for Nginx Proxy
       working-directory: ./frontend
       run: |
         # Kill existing frontend process
@@ -294,7 +286,7 @@ jobs:
           rm frontend.pid
         fi
         
-        # Start frontend with backend URL  
+        # Start frontend (nginx will proxy requests)
         nohup npm start > frontend.log 2>&1 &
         echo $! > frontend.pid
         
@@ -302,7 +294,7 @@ jobs:
         timeout=30
         while [ $timeout -gt 0 ]; do
           if curl -f http://localhost:3000 >/dev/null 2>&1; then
-            echo "✅ Frontend restarted successfully with backend URL!"
+            echo "✅ Frontend restarted successfully!"
             break
           fi
           echo "⏳ Waiting for frontend to restart... ($timeout seconds left)"
@@ -324,24 +316,26 @@ jobs:
           **Duration:** ${{ github.event.inputs.demo_duration }} minutes
           **Started:** ${new Date().toISOString()}
           
-          ## 🔗 Access URLs
+          ## 🔗 Access URL
           
-          ### Frontend (Next.js UI)
-          **URL:** ${{ env.FRONTEND_URL }}
+          ### 🌐 Demo Application
+          **URL:** ${{ env.DEMO_URL }}
           
           **Features:**
-          - ✅ Rules Management Interface
-          - ✅ Version Control System
-          - ✅ Change Request Workflow
-          - ✅ WCO Data Processing
+          - ✅ **Frontend UI**: `${{ env.DEMO_URL }}/`
+          - ✅ **Backend API**: `${{ env.DEMO_URL }}/api/v1`
+          - ✅ **Health Check**: `${{ env.DEMO_URL }}/actuator/health`
           
-          ### Backend (Spring Boot API)
-          **URL:** ${{ env.BACKEND_URL }}
+          **Available Functions:**
+          - 📋 Rules Management Interface
+          - 🔄 Version Control System  
+          - 📝 Change Request Workflow
+          - 🌍 WCO Data Processing
           
-          **Endpoints:**
-          - 🔗 API Base: `${{ env.BACKEND_URL }}/api/v1`
-          - 🏥 Health Check: `${{ env.BACKEND_URL }}/actuator/health`
-          - 📊 Rules API: `${{ env.BACKEND_URL }}/api/v1/rules`
+          **API Endpoints:**
+          - � Rules API: `${{ env.DEMO_URL }}/api/v1/rules`
+          - 📦 Metadata: `${{ env.DEMO_URL }}/api/v1/rules/metadata`
+          - 🏥 Health: `${{ env.DEMO_URL }}/actuator/health`
           
           ## 📊 Sample WCO Data
           
@@ -391,19 +385,17 @@ jobs:
         **Duration:** ${{ github.event.inputs.demo_duration }} minutes
         **Started:** $(date -u +"%Y-%m-%dT%H:%M:%SZ")
         
-        ## 🔗 Access URLs
+        ## 🔗 Access URL
         
-        ### Frontend (Next.js UI)
-        **URL:** ${{ env.FRONTEND_URL }}
-        
-        ### Backend (Spring Boot API)  
-        **URL:** ${{ env.BACKEND_URL }}
+        ### 🌐 Demo Application
+        **URL:** ${{ env.DEMO_URL }}
         
         ## 🧪 Quick Test
         
-        - **Frontend:** Open ${{ env.FRONTEND_URL }} for the UI
-        - **Backend:** Test API at ${{ env.BACKEND_URL }}/actuator/health
-        - **Integration:** Frontend connects to backend automatically
+        - **Frontend UI:** Open ${{ env.DEMO_URL }} 
+        - **Backend API:** Test ${{ env.DEMO_URL }}/actuator/health
+        - **Rules API:** Test ${{ env.DEMO_URL }}/api/v1/rules
+        - **Single Domain:** All services accessible via one URL
         
         ## ⚠️ Important
         This demo will automatically stop in ${{ github.event.inputs.demo_duration }} minutes.
@@ -418,16 +410,16 @@ jobs:
         
         echo "🎯 Demo will run for $duration_minutes minutes ($duration_seconds seconds)"
         echo ""
-        echo "🌐 Frontend: ${{ env.FRONTEND_URL }}"
-        echo "🔧 Backend:  ${{ env.BACKEND_URL }}"
+        echo "🌐 Demo URL: ${{ env.DEMO_URL }}"
         echo ""
         echo "⏰ Demo started at: $(date)"
         echo "⏰ Demo will end at: $(date -d "+$duration_minutes minutes" 2>/dev/null || date -v+${duration_minutes}M 2>/dev/null || echo "$(date) + $duration_minutes minutes")"
         echo ""
         echo "🧪 How to test:"
-        echo "  1. Frontend UI: ${{ env.FRONTEND_URL }}"
-        echo "  2. Backend API: ${{ env.BACKEND_URL }}/actuator/health"
-        echo "  3. Rules API: ${{ env.BACKEND_URL }}/api/v1/rules"
+        echo "  1. Frontend UI: ${{ env.DEMO_URL }}/"
+        echo "  2. Backend API: ${{ env.DEMO_URL }}/actuator/health"  
+        echo "  3. Rules API: ${{ env.DEMO_URL }}/api/v1/rules"
+        echo "  4. Single domain for all services!"
         
         # Keep alive and show logs
         end_time=$(($(date +%s) + duration_seconds))
@@ -459,13 +451,16 @@ jobs:
       run: |
         echo "🧹 Cleaning up demo..."
         
-        # Kill processes
+        # Kill application processes
         if [ -f ./backend/backend.pid ]; then
           kill $(cat ./backend/backend.pid) || true
         fi
         if [ -f ./frontend/frontend.pid ]; then
           kill $(cat ./frontend/frontend.pid) || true
         fi
+        
+        # Stop nginx
+        sudo systemctl stop nginx || true
         
         # Kill ngrok processes
         pkill ngrok || true
@@ -486,13 +481,16 @@ jobs:
         
         echo ""
         echo "### Log Files:"
-        for log in backend.log frontend.log ngrok-backend.log ngrok-frontend.log; do
+        for log in backend.log frontend.log ngrok.log; do
           if [ -f "$log" ]; then
             echo "📄 $log (last 10 lines):"
             tail -n 10 "$log"
             echo ""
           fi
         done
+        
+        echo "### Nginx Status:"
+        sudo systemctl status nginx --no-pager || echo "Nginx not running"
 
     # Final status
     - name: Demo Summary
@@ -500,13 +498,13 @@ jobs:
       run: |
         echo "## 📊 Demo Summary"
         echo "**Duration:** ${{ github.event.inputs.demo_duration }} minutes"
-        echo "**Frontend URL:** ${{ env.FRONTEND_URL }}"
-        echo "**Backend URL:** ${{ env.BACKEND_URL }}"
+        echo "**Demo URL:** ${{ env.DEMO_URL }}"
         echo "**Status:** Demo completed"
         echo ""
         echo "🎯 **Demo Architecture:**"
-        echo "   - Frontend: Public UI via ngrok tunnel (port 3000)"
-        echo "   - Backend: Public API via ngrok tunnel (port 8080)"
-        echo "   - Frontend connects to backend via public URLs"
+        echo "   - Nginx Reverse Proxy: Single entry point on port 80"
+        echo "   - Frontend (/) → localhost:3000 (Next.js)"
+        echo "   - Backend (/api, /actuator) → localhost:8080 (Spring Boot)"
+        echo "   - Single ngrok tunnel → nginx → internal services"
         echo ""
         echo "Thank you for trying Drools UI Demo! 🎉"
