@@ -1,6 +1,6 @@
-// API configuration - call backend directly
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080'
-const API_BASE = `${BACKEND_URL}/api/v1`
+// API configuration - use relative URLs if no backend URL specified (for nginx proxy)
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || ''
+const API_BASE = BACKEND_URL ? `${BACKEND_URL}/api/v1` : '/api/v1'
 
 export const api = {
   rules: {

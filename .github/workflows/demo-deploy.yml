@@ -271,7 +271,7 @@ jobs:
     - name: Rebuild Frontend for Nginx Proxy
       working-directory: ./frontend
       env:
-        NEXT_PUBLIC_API_URL: ""  # Use relative URLs - nginx will proxy /api to backend
+        NEXT_PUBLIC_BACKEND_URL: ""  # Use relative URLs - nginx will proxy /api to backend
       run: |
         echo "🔄 Rebuilding frontend for nginx proxy (using relative /api URLs)"
         npm run build
