@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       demo_duration:
-        description: 'Demo duration in minutes'
+        description: 'Demo duration in minutes (max 60)'
         required: false
-        default: '10'
+        default: '15'
         type: string
       demo_message:
         description: 'Demo description/message'
@@ -26,7 +26,7 @@ env:
 jobs:
   live-demo:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # Max 15 minutes to prevent infinite runs
+    timeout-minutes: 75  # Max 75 minutes (setup + demo + cleanup)
     
     services:
       postgres:
